@@ -63,7 +63,14 @@ def dispatcher(redis_url, session_factory, tmp_repo, tmp_store):
     return Dispatcher(redis_url, session_factory, tmp_repo, tmp_store)
 
 
-def _make_task(session_factory, task_id: str, status: str, outputs: list[str] | None = None):
+def _make_task(
+    session_factory,
+    task_id: str,
+    status: str,
+    outputs: list[str] | None = None,
+    retry_count: int = 0,
+    budget_retries: int = 1,
+):
     now = datetime.now(timezone.utc)
     with session_factory() as s:
         task = Task(
@@ -77,7 +84,8 @@ def _make_task(session_factory, task_id: str, status: str, outputs: list[str] | 
             outputs=outputs or [],
             acceptance=[],
             risk_tier=1,
-            budget={"tokens": 10_000, "wall_clock_min": 5, "retries": 1},
+            budget={"tokens": 10_000, "wall_clock_min": 5, "retries": budget_retries},
+            retry_count=retry_count,
             created_at=now,
             updated_at=now,
         )
@@ -211,6 +219,64 @@ def test_recover_stale_republishes_assigned_task(
     messages = dispatcher._publisher._r.xrange(STREAM_KEY)
     assigned_msgs = [m for _, m in messages if m.get("task_id") == task_id]
     assert len(assigned_msgs) >= 1
+
+
+# ---------------------------------------------------------------------------
+# _on_task_failed — retry policy
+# ---------------------------------------------------------------------------
+
+
+def test_on_task_failed_retries_within_budget(clean_db, redis_client, session_factory, dispatcher):
+    """A failed task within its retry budget should be re-launched on a new run."""
+    task_id = _make_task(session_factory, "TASK-FAIL01", "failed", budget_retries=2, retry_count=0)
+    with patch("orchestrator.orchestrator.dispatcher.subprocess.Popen") as mock_popen:
+        with session_factory() as session:
+            dispatcher._on_task_failed(task_id, session)
+    mock_popen.assert_called_once()
+    with session_factory() as s:
+        task = s.get(Task, task_id)
+        assert task.status == "running"
+        assert task.retry_count == 1
+
+
+def test_on_task_failed_escalates_when_retries_exhausted(
+    clean_db, redis_client, session_factory, dispatcher
+):
+    """A failed task that has used all retries should be escalated."""
+    task_id = _make_task(session_factory, "TASK-FAIL02", "failed", budget_retries=2, retry_count=2)
+    with patch("orchestrator.orchestrator.dispatcher.subprocess.Popen") as mock_popen:
+        with session_factory() as session:
+            dispatcher._on_task_failed(task_id, session)
+    mock_popen.assert_not_called()
+    with session_factory() as s:
+        task = s.get(Task, task_id)
+        assert task.status == "escalated"
+
+
+def test_retry_branch_has_retry_suffix(clean_db, redis_client, session_factory, dispatcher):
+    """The retry run's branch name should carry a -retry-N suffix."""
+    import sqlalchemy
+
+    task_id = _make_task(session_factory, "TASK-FAIL03", "failed", budget_retries=2, retry_count=0)
+    with patch("orchestrator.orchestrator.dispatcher.subprocess.Popen"):
+        with session_factory() as session:
+            dispatcher._on_task_failed(task_id, session)
+    with session_factory() as s:
+        run = s.execute(sqlalchemy.select(Run).where(Run.task_id == task_id)).scalars().first()
+        assert run is not None
+        assert run.branch.endswith("-retry-1")
+
+
+def test_on_task_failed_skips_non_failed_task(clean_db, redis_client, session_factory, dispatcher):
+    """Handler is a no-op when the task is not in failed status (stale event guard)."""
+    task_id = _make_task(session_factory, "TASK-FAIL04", "running")
+    with patch("orchestrator.orchestrator.dispatcher.subprocess.Popen") as mock_popen:
+        with session_factory() as session:
+            dispatcher._on_task_failed(task_id, session)
+    mock_popen.assert_not_called()
+    with session_factory() as s:
+        task = s.get(Task, task_id)
+        assert task.status == "running"
 
 
 def test_recover_stale_skips_task_with_active_run(

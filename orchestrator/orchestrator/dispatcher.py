@@ -91,6 +91,8 @@ class Dispatcher:
                 self._on_task_assigned(task_id, session)
             elif event_type in ("TASK_COMPLETED", "TASK_VALIDATED", "TASK_MERGED"):
                 self._on_task_completed(task_id, session)
+            elif event_type == "TASK_FAILED":
+                self._on_task_failed(task_id, session)
 
     def _on_task_assigned(self, task_id: str, session: Session) -> None:
         """Create a run and launch the agent subprocess, unless blocked by a conflict."""
@@ -109,6 +111,40 @@ class Dispatcher:
         transition(session, task_id, "running", actor="dispatcher")
         session.commit()
         self._launch_agent(run)
+
+    def _on_task_failed(self, task_id: str, session: Session) -> None:
+        """Retry the task or escalate it when the retry budget is exhausted."""
+        task = session.get(Task, task_id)
+        if task is None or task.status != "failed":
+            return  # stale event
+        budget_retries: int = task.budget.get("retries", 0)
+        if task.retry_count < budget_retries:
+            task.retry_count += 1
+            run = create_run(
+                session,
+                task_id,
+                task.owner,
+                self._repo_path,
+                self._store_dir,
+                retry_count=task.retry_count,
+            )
+            event = transition(session, task_id, "running", actor="dispatcher")
+            session.commit()
+            self._publisher.publish(
+                str(event.event_id), "TASK_RETRIED", task_id, {"attempt": task.retry_count}
+            )
+            self._launch_agent(run)
+            log.info("Retrying task %s (attempt %d/%d)", task_id, task.retry_count, budget_retries)
+        else:
+            event = transition(session, task_id, "escalated", actor="dispatcher")
+            session.commit()
+            self._publisher.publish(
+                str(event.event_id),
+                "TASK_ESCALATED",
+                task_id,
+                {"reason": "retries_exhausted", "retry_count": task.retry_count},
+            )
+            log.warning("Task %s escalated after %d failed attempts", task_id, task.retry_count)
 
     def _on_task_completed(self, task_id: str, session: Session) -> None:
         """Advance any DAG successors that are now fully unblocked."""

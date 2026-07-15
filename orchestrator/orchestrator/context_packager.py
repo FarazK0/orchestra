@@ -110,6 +110,7 @@ def create_run(
     agent_id: str,
     repo_path: Path,
     store_dir: Path,
+    retry_count: int = 0,
 ) -> Run:
     """Build and persist a context package; insert and return the new Run row.
 
@@ -117,11 +118,13 @@ def create_run(
     row to the session. The caller must commit the transaction.
 
     Args:
-        session:   An open SQLAlchemy Session.
-        task_id:   Task being run.
-        agent_id:  Identity of the agent that will consume this run.
-        repo_path: Root of the managed Git repo (for reading artifacts).
-        store_dir: Directory where the context package JSON is written.
+        session:     An open SQLAlchemy Session.
+        task_id:     Task being run.
+        agent_id:    Identity of the agent that will consume this run.
+        repo_path:   Root of the managed Git repo (for reading artifacts).
+        store_dir:   Directory where the context package JSON is written.
+        retry_count: Which attempt this is (0 = first, 1 = first retry, …).
+                     Retry attempts get a fresh branch with a -retry-{n} suffix.
 
     Raises:
         TaskNotFoundError: task_id is not in the tasks table.
@@ -129,6 +132,12 @@ def create_run(
     run_id = uuid.uuid4()
     package = build_context_package(session, task_id, repo_path)
     package["run_id"] = str(run_id)
+
+    # Derive branch from agent type; append retry suffix for retries.
+    agent_type = agent_id.removesuffix("-agent")
+    suffix = f"-retry-{retry_count}" if retry_count > 0 else ""
+    branch = f"agent/{agent_type}/{task_id}{suffix}"
+    package["agent_instructions"]["branch"] = branch
     package["agent_instructions"]["agent_id"] = agent_id
 
     store_dir.mkdir(parents=True, exist_ok=True)

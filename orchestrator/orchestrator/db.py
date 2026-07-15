@@ -46,6 +46,7 @@ class Task(Base):
     acceptance: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     risk_tier: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     budget: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
