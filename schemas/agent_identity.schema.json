@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orchestra/agent-identity",
+  "title": "AgentIdentity",
+  "type": "object",
+  "required": ["schema_version", "id", "role", "description", "skills", "subscriptions"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string"},
+    "role": {"type": "string"},
+    "description": {"type": "string"},
+    "skills": {"type": "array", "items": {"type": "string"}},
+    "subscriptions": {"type": "array", "items": {"type": "string"},
+                      "description": "event types this agent consumes (Phase 2+)"}
+  }
+}

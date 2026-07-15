@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orchestra/run-record",
+  "title": "RunRecord",
+  "type": "object",
+  "required": ["schema_version", "run_id", "task_id", "agent_id", "branch", "context_package_ref", "started_at"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "run_id": {"type": "string", "format": "uuid"},
+    "task_id": {"type": "string"},
+    "agent_id": {"type": "string"},
+    "branch": {"type": "string", "description": "agent/<agent>/<task_id>[-r<retry>]"},
+    "context_package_ref": {"type": "string",
+                             "description": "stored context package for reproducibility"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": ["string", "null"], "format": "date-time"},
+    "result": {"enum": ["success", "failed", "timeout", "budget_exceeded", null]},
+    "tokens_used": {"type": "integer", "default": 0},
+    "cost_usd": {"type": "number", "default": 0}
+  }
+}

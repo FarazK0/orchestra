@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "backend-agent",
+  "role": "Backend Engineer",
+  "description": "Implements backend services, APIs, and their tests in the managed project.",
+  "skills": ["python", "fastapi", "pytest"],
+  "subscriptions": []
+}

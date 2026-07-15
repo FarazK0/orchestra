@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orchestra/task",
+  "title": "Task",
+  "type": "object",
+  "required": ["schema_version", "id", "title", "owner", "status", "risk_tier", "budget"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^TASK-[0-9]{3,}$"},
+    "title": {"type": "string"},
+    "owner": {"type": "string", "description": "agent id or 'human'"},
+    "status": {"enum": ["created", "assigned", "running", "completed", "validated",
+                         "merged", "closed", "failed", "escalated", "cancelled"]},
+    "depends_on": {"type": "array", "items": {"type": "string"}, "default": []},
+    "inputs": {"type": "array", "items": {"type": "string"},
+               "description": "artifact paths included in the context package"},
+    "outputs": {"type": "array", "items": {"type": "string"},
+                "description": "paths the task is allowed to write; also the conflict-detection key"},
+    "acceptance": {"type": "array", "items": {"type": "string"}},
+    "risk_tier": {"type": "integer", "minimum": 0, "maximum": 2},
+    "budget": {
+      "type": "object",
+      "required": ["tokens", "wall_clock_min", "retries"],
+      "properties": {
+        "tokens": {"type": "integer"},
+        "wall_clock_min": {"type": "integer"},
+        "retries": {"type": "integer"}
+      }
+    }
+  }
+}

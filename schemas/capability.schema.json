@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orchestra/capability",
+  "title": "Capability",
+  "description": "Phase 1: orchestrator-side allowlist record. Phase 3: claims of a signed token.",
+  "type": "object",
+  "required": ["schema_version", "capability_id", "task_id", "agent_id", "expires_at", "scopes"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "capability_id": {"type": "string", "format": "uuid"},
+    "task_id": {"type": "string"},
+    "agent_id": {"type": "string"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "revoked": {"type": "boolean", "default": false},
+    "scopes": {
+      "type": "object",
+      "properties": {
+        "read": {"type": "array", "items": {"type": "string"}},
+        "write": {"type": "array", "items": {"type": "string"}},
+        "execute": {"type": "array", "items": {"type": "string"}},
+        "emit": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

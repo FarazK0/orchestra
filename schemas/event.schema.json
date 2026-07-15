@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "orchestra/event",
+  "title": "Event",
+  "type": "object",
+  "required": ["schema_version", "event_id", "event_type", "task_id", "emitted_by", "emitted_at", "payload"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "event_id": {"type": "string", "format": "uuid",
+                 "description": "idempotency key; consumers dedup on this"},
+    "event_type": {"type": "string",
+                   "examples": ["TASK_CREATED", "TASK_ASSIGNED", "TASK_COMPLETED",
+                                 "TASK_VALIDATED", "TASK_MERGED", "TASK_FAILED",
+                                 "API_CREATED", "QUESTION", "ANSWER",
+                                 "CONFLICT_DETECTED", "HUMAN_ATTENTION_NEEDED"]},
+    "task_id": {"type": ["string", "null"]},
+    "emitted_by": {"type": "string"},
+    "emitted_at": {"type": "string", "format": "date-time"},
+    "payload": {"type": "object"}
+  }
+}
