@@ -13,10 +13,11 @@ import os
 from datetime import datetime, timezone
 
 import pytest
+import redis as redis_lib
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
 load_dotenv()
 
@@ -78,6 +79,32 @@ def session(engine):
     yield sess
     sess.rollback()
     sess.close()
+
+
+_REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6380")
+
+
+@pytest.fixture(scope="session")
+def redis_url() -> str:
+    return _REDIS_URL
+
+
+@pytest.fixture
+def redis_client(redis_url: str):
+    """Per-test Redis client. Deletes the test stream on teardown."""
+    from orchestrator.orchestrator.streams import STREAM_KEY
+
+    r = redis_lib.Redis.from_url(redis_url, decode_responses=True)
+    yield r
+    r.delete(STREAM_KEY)
+    r.close()
+
+
+@pytest.fixture
+def session_factory(engine):
+    """Session factory (not rolled-back) for use by StreamConsumer internals."""
+    factory = sessionmaker(engine)
+    return factory
 
 
 _DEFAULT_BUDGET = {"tokens": 100_000, "wall_clock_min": 30, "retries": 2}

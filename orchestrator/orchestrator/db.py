@@ -1,10 +1,11 @@
 """SQLAlchemy ORM models for the Orchestra control plane.
 
-Four tables:
-  tasks  - mutable task state (status is the only frequently-written column)
-  events - append-only event log (never UPDATE or DELETE)
-  runs   - one row per agent run attempt
-  audit  - one row per auditable action, joined to the triggering event
+Five tables:
+  tasks            - mutable task state (status is the only frequently-written column)
+  events           - append-only event log (never UPDATE or DELETE)
+  runs             - one row per agent run attempt
+  audit            - one row per auditable action, joined to the triggering event
+  stream_deliveries - dedup table for Redis Streams exactly-once processing
 """
 
 from __future__ import annotations
@@ -13,7 +14,16 @@ import os
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, create_engine
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -88,6 +98,27 @@ class AuditRow(Base):
         UUID(as_uuid=True), ForeignKey("events.event_id"), nullable=False
     )
     details: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+class StreamDelivery(Base):
+    """Dedup table for Redis Streams — ensures exactly-once processing per consumer group."""
+
+    __tablename__ = "stream_deliveries"
+
+    delivery_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    stream_key: Mapped[str] = mapped_column(Text, nullable=False)
+    message_id: Mapped[str] = mapped_column(
+        Text, nullable=False
+    )  # Redis msg ID e.g. "1234567890-0"
+    consumer_group: Mapped[str] = mapped_column(Text, nullable=False)
+    event_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("stream_key", "message_id", "consumer_group", name="uq_stream_delivery"),
+    )
 
 
 def get_engine(url: str | None = None):

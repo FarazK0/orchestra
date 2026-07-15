@@ -35,14 +35,13 @@ These hold from the first commit. Never violate them, even for a "quick test":
 
 ## Current phase
 
-**Phase 1: Walking skeleton.** One human, one backend agent, real Git, real audit.
-Scope: task CRUD + CLI, context packager, gateway with allowlist permissions (no signed
-tokens yet), single agent loop, validator (ruff + pytest), human merge flow.
+**Phase 1 complete.** Walking skeleton shipped: task CRUD + CLI, context packager,
+gateway, single backend agent loop, validator (ruff + pytest), human merge flow.
+Retrospective: `docs/design/phase1-retro.md`.
 
-Explicitly OUT of scope for Phase 1 (do not build these yet, even if the design doc
-describes them): Redis Streams, multi-agent, DAG scheduling, capability tokens, risk
-tiers, any web UI, dynamic spawning. If a Phase 1 task seems to need one of these,
-stub the interface and note it in `docs/adr/`.
+**Phase 2 in progress.** Redis Streams event bus (Step 14 done). Steps remaining:
+DAG scheduling (15), frontend agent (16), QA agent (17), retry policy (18), Tier 0
+auto-merge (19), multi-agent fan-out (20), end-to-end demo v2 (21), Phase 2 retro (22).
 
 Phase gates and weekly breakdown are in the design doc, Part 5.
 
@@ -89,7 +88,11 @@ orchestra/
   hardcode credentials, account IDs, or API keys.
 - The developer works on Windows + WSL2. Everything must run inside WSL2/Docker;
   do not assume Docker Desktop paths. Ports: Postgres 5433 on host (5432 is often
-  taken), gateway 8081, orchestrator 8080.
+  taken), gateway 8081, orchestrator 8080, Redis 6380 (host) mapped from container 6379.
+- `REDIS_URL=redis://localhost:6380` — set in `.env`; used by `StreamPublisher` /
+  `StreamConsumer` in `orchestrator/orchestrator/streams.py`.
+- Postgres data is persisted at `~/.orchestra/pgdata` (WSL2 bind mount, not a named
+  volume) to avoid the 128 MB Docker Desktop VHD limit.
 
 ## Commands
 
