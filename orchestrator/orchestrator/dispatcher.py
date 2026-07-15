@@ -43,6 +43,7 @@ _RECOVER_INTERVAL = 30  # call _recover_stale every this many consume_one iterat
 _AGENT_MODULES: dict[str, str] = {
     "backend-agent": "agents.backend.main",
     "frontend-agent": "agents.frontend.main",
+    "qa-agent": "agents.qa.main",
 }
 
 

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "qa-agent",
+  "role": "Quality Assurance Engineer",
+  "description": "Reviews validated agent output, runs tests, and files a structured QA report artifact.",
+  "skills": ["testing", "ruff", "pytest", "code-review"],
+  "subscriptions": []
+}

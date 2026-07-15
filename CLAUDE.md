@@ -40,8 +40,8 @@ gateway, single backend agent loop, validator (ruff + pytest), human merge flow.
 Retrospective: `docs/design/phase1-retro.md`.
 
 **Phase 2 in progress.** Redis Streams event bus (Step 14 done), DAG scheduling +
-event-driven dispatch (Step 15 done), frontend agent (Step 16 done). Steps remaining:
-QA agent (17), retry policy (18), Tier 0 auto-merge (19), multi-agent fan-out (20),
+event-driven dispatch (Step 15 done), frontend agent (Step 16 done), QA agent (Step 17 done).
+Steps remaining: retry policy (18), Tier 0 auto-merge (19), multi-agent fan-out (20),
 end-to-end demo v2 (21), Phase 2 retro (22).
 
 Phase gates and weekly breakdown are in the design doc, Part 5.
@@ -107,7 +107,7 @@ All canonical commands live in the Makefile. Current targets:
 - `make demo` — run the Phase 1 end-to-end demo (`scripts/demo.sh`; requires both services running and `ANTHROPIC_API_KEY`)
 
 `orchctl` commands (run via `uv run orchctl`):
-- `create-task TITLE [--owner AGENT_ID] [--accept CRITERION] [--input PATH] [--output PATH]` — create a task
+- `create-task TITLE [--owner AGENT_ID] [--accept CRITERION] [--input PATH] [--output PATH]` — create a task; valid `--owner` values: `backend-agent`, `frontend-agent`, `qa-agent`
 - `list [--status STATUS]` — list tasks
 - `approve TASK-ID` — advance through human approval gate (created→assigned, validated→merged)
 - `run-task TASK-ID --repo PATH` — assemble context package and start run (assigned→running)
