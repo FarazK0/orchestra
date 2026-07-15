@@ -86,6 +86,34 @@ def test_get_ready_successors_excludes_non_created(session):
     assert not any(s.id == b.id for s in successors)
 
 
+def test_get_ready_successors_returns_multiple(session):
+    """One parent completion unblocks two siblings simultaneously."""
+    parent = make_task(session, "TASK-D62", status="completed")
+    s1 = make_task(session, "TASK-D63", status="created")
+    s2 = make_task(session, "TASK-D64", status="created")
+    s1.depends_on = [parent.id]
+    s2.depends_on = [parent.id]
+    session.flush()
+    successors = get_ready_successors(parent.id, session)
+    ids = {t.id for t in successors}
+    assert ids == {"TASK-D63", "TASK-D64"}
+
+
+def test_get_ready_successors_excludes_one_of_two_still_blocked(session):
+    """Only the fully-unblocked sibling should appear when a shared dep is still running."""
+    parent = make_task(session, "TASK-D65", status="completed")
+    still_running = make_task(session, "TASK-D66", status="running")
+    unblocked = make_task(session, "TASK-D67", status="created")
+    blocked = make_task(session, "TASK-D68", status="created")
+    unblocked.depends_on = [parent.id]
+    blocked.depends_on = [parent.id, still_running.id]
+    session.flush()
+    successors = get_ready_successors(parent.id, session)
+    ids = {t.id for t in successors}
+    assert "TASK-D67" in ids
+    assert "TASK-D68" not in ids
+
+
 # ---------------------------------------------------------------------------
 # outputs_overlap
 # ---------------------------------------------------------------------------

@@ -62,6 +62,9 @@ def create_task(
     output: Optional[list[str]] = typer.Option(
         None, "--output", "-o", help="Output artifact path (repeatable, relative to repo root)."
     ),
+    depends_on: Optional[list[str]] = typer.Option(
+        None, "--depends-on", "-d", help="Task ID this task depends on (repeatable)."
+    ),
     tokens: int = typer.Option(100_000, help="Token budget."),
     wall_clock_min: int = typer.Option(30, help="Wall-clock budget in minutes."),
     retries: int = typer.Option(2, help="Retry budget."),
@@ -74,6 +77,7 @@ def create_task(
         "acceptance": accept or [],
         "inputs": input or [],
         "outputs": output or [],
+        "depends_on": depends_on or [],
         "budget": {
             "tokens": tokens,
             "wall_clock_min": wall_clock_min,

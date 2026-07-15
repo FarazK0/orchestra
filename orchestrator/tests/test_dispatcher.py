@@ -221,6 +221,74 @@ def test_on_task_completed_auto_assigns_successor(
     assert len(assigned_msgs) >= 1
 
 
+def test_multi_successor_fan_out_both_assigned(clean_db, redis_client, session_factory, dispatcher):
+    """Completing backend task should auto-assign both frontend and QA successors."""
+    backend_id = _make_task(session_factory, "TASK-FAN01", "completed")
+    frontend_id = _make_task(session_factory, "TASK-FAN02", "created")
+    qa_id = _make_task(session_factory, "TASK-FAN03", "created")
+
+    with session_factory() as s:
+        fe = s.get(Task, frontend_id)
+        fe.depends_on = [backend_id]
+        qa = s.get(Task, qa_id)
+        qa.depends_on = [backend_id]
+        s.commit()
+
+    with session_factory() as session:
+        dispatcher._on_task_completed(backend_id, session)
+
+    with session_factory() as s:
+        assert s.get(Task, frontend_id).status == "assigned"
+        assert s.get(Task, qa_id).status == "assigned"
+
+    messages = dispatcher._publisher._r.xrange(STREAM_KEY)
+    assigned_task_ids = {
+        m.get("task_id") for _, m in messages if m.get("event_type") == "TASK_ASSIGNED"
+    }
+    assert frontend_id in assigned_task_ids
+    assert qa_id in assigned_task_ids
+
+
+def test_fan_out_conflict_serializes_one_successor(
+    clean_db, redis_client, session_factory, dispatcher
+):
+    """When fan-out successors have overlapping outputs, only one launches at a time."""
+    backend_id = _make_task(session_factory, "TASK-FAN10", "completed")
+    fe_id = _make_task(session_factory, "TASK-FAN11", "created", outputs=["src/shared/"])
+    qa_id = _make_task(session_factory, "TASK-FAN12", "created", outputs=["src/shared/util.py"])
+
+    with session_factory() as s:
+        fe = s.get(Task, fe_id)
+        fe.depends_on = [backend_id]
+        qa = s.get(Task, qa_id)
+        qa.depends_on = [backend_id]
+        s.commit()
+
+    # Fan-out: both successors transition to assigned
+    with session_factory() as session:
+        dispatcher._on_task_completed(backend_id, session)
+
+    with session_factory() as s:
+        assert s.get(Task, fe_id).status == "assigned"
+        assert s.get(Task, qa_id).status == "assigned"
+
+    # Now dispatch both; one must win and block the other
+    with patch("orchestrator.orchestrator.dispatcher.subprocess.Popen") as mock_popen:
+        with session_factory() as session:
+            dispatcher._on_task_assigned(fe_id, session)
+        with session_factory() as session:
+            dispatcher._on_task_assigned(qa_id, session)
+
+    # Exactly one agent subprocess should have been launched
+    assert mock_popen.call_count == 1
+
+    # The loser stays 'assigned' so _recover_stale can retry it later
+    with session_factory() as s:
+        fe_status = s.get(Task, fe_id).status
+        qa_status = s.get(Task, qa_id).status
+    assert {fe_status, qa_status} == {"running", "assigned"}
+
+
 # ---------------------------------------------------------------------------
 # _recover_stale
 # ---------------------------------------------------------------------------
