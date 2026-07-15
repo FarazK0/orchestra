@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "id": "frontend-agent",
+  "role": "Frontend Engineer",
+  "description": "Implements UI templates, static assets, and client-side code in the managed project.",
+  "skills": ["html", "css", "javascript", "jinja2"],
+  "subscriptions": []
+}

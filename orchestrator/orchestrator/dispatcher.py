@@ -38,6 +38,13 @@ log = logging.getLogger(__name__)
 
 _RECOVER_INTERVAL = 30  # call _recover_stale every this many consume_one iterations
 
+# Maps agent_id to the Python module used to launch that agent.
+# Unknown agent_ids fall back to the backend agent.
+_AGENT_MODULES: dict[str, str] = {
+    "backend-agent": "agents.backend.main",
+    "frontend-agent": "agents.frontend.main",
+}
+
 
 class Dispatcher:
     def __init__(
@@ -116,11 +123,12 @@ class Dispatcher:
     # ------------------------------------------------------------------
 
     def _launch_agent(self, run: Run) -> None:
+        module = _AGENT_MODULES.get(run.agent_id, "agents.backend.main")
         subprocess.Popen(
             [
                 sys.executable,
                 "-m",
-                "agents.backend.main",
+                module,
                 "--context",
                 run.context_package_ref,
                 "--run-id",
@@ -129,7 +137,7 @@ class Dispatcher:
                 str(self._repo_path),
             ]
         )
-        log.info("Launched agent for run %s (task %s)", run.run_id, run.task_id)
+        log.info("Launched %s for run %s (task %s)", module, run.run_id, run.task_id)
 
     # ------------------------------------------------------------------
     # Stale-task recovery
