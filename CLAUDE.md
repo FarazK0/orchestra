@@ -39,9 +39,10 @@ These hold from the first commit. Never violate them, even for a "quick test":
 gateway, single backend agent loop, validator (ruff + pytest), human merge flow.
 Retrospective: `docs/design/phase1-retro.md`.
 
-**Phase 2 in progress.** Redis Streams event bus (Step 14 done). Steps remaining:
-DAG scheduling (15), frontend agent (16), QA agent (17), retry policy (18), Tier 0
-auto-merge (19), multi-agent fan-out (20), end-to-end demo v2 (21), Phase 2 retro (22).
+**Phase 2 in progress.** Redis Streams event bus (Step 14 done), DAG scheduling +
+event-driven dispatch (Step 15 done). Steps remaining: frontend agent (16), QA agent (17),
+retry policy (18), Tier 0 auto-merge (19), multi-agent fan-out (20), end-to-end demo v2
+(21), Phase 2 retro (22).
 
 Phase gates and weekly breakdown are in the design doc, Part 5.
 

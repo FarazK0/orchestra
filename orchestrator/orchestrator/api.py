@@ -9,15 +9,18 @@ GET  /tasks/{task_id}              get one task
 POST /tasks/{task_id}/transition   advance the state machine
 GET  /tasks/{task_id}/events       audit-trail events for a task
 POST /tasks/{task_id}/run          assemble context package and start a run
+POST /tasks/{task_id}/validate     run ruff + pytest and transition completed -> validated/failed
 """
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Generator
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+import redis.exceptions
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -31,8 +34,28 @@ from .db import Event as EventORM
 from .db import Task as TaskORM
 from .db import get_engine, get_session_factory
 from .state_machine import InvalidTransitionError, TaskNotFoundError, transition
+from .streams import StreamPublisher
+
+log = logging.getLogger(__name__)
 
 app = FastAPI(title="Orchestra Orchestrator", version="0.1.0")
+
+# ---------------------------------------------------------------------------
+# Best-effort Redis event publish
+# ---------------------------------------------------------------------------
+
+_publisher: StreamPublisher | None = None
+
+
+def _try_publish(event_id: str, event_type: str, task_id: str, payload: dict) -> None:
+    global _publisher
+    if _publisher is None:
+        _publisher = StreamPublisher()
+    try:
+        _publisher.publish(event_id, event_type, task_id, payload)
+    except redis.exceptions.RedisError as exc:
+        log.warning("Redis publish failed for event %s: %s", event_id, exc)
+
 
 # ---------------------------------------------------------------------------
 # DB session dependency
@@ -174,9 +197,10 @@ def transition_task(
     task_id: str,
     body: TransitionRequest,
     session: SessionDep,
+    bg: BackgroundTasks,
 ) -> TaskSchema:
     try:
-        transition(
+        event = transition(
             session,
             task_id,
             body.new_status,
@@ -188,6 +212,7 @@ def transition_task(
         raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
     except InvalidTransitionError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    bg.add_task(_try_publish, str(event.event_id), event.event_type, task_id, event.payload)
     return TaskSchema.model_validate(session.get(TaskORM, task_id))
 
 
@@ -205,7 +230,9 @@ def list_task_events(task_id: str, session: SessionDep) -> list[EventSchema]:
 
 
 @app.post("/tasks/{task_id}/run", response_model=RunRecordSchema, status_code=201)
-def start_run(task_id: str, body: RunRequest, session: SessionDep) -> RunRecordSchema:
+def start_run(
+    task_id: str, body: RunRequest, session: SessionDep, bg: BackgroundTasks
+) -> RunRecordSchema:
     """Assemble the context package, create a Run row, transition task to running."""
     from .context_packager import (
         TaskNotFoundError as PackagerNotFound,
@@ -227,7 +254,7 @@ def start_run(task_id: str, body: RunRequest, session: SessionDep) -> RunRecordS
     except PackagerNotFound:
         raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
 
-    transition(
+    event = transition(
         session,
         task_id,
         "running",
@@ -235,6 +262,7 @@ def start_run(task_id: str, body: RunRequest, session: SessionDep) -> RunRecordS
         payload={"run_id": str(run.run_id)},
         details={"context_package_ref": run.context_package_ref},
     )
+    bg.add_task(_try_publish, str(event.event_id), event.event_type, task_id, event.payload)
 
     return RunRecordSchema.model_validate(run)
 
@@ -244,6 +272,7 @@ def validate_task_endpoint(
     task_id: str,
     body: ValidateRequest,
     session: SessionDep,
+    bg: BackgroundTasks,
 ) -> TaskSchema:
     """Run ruff + pytest on the agent branch and transition to validated/failed."""
     from .validator import ValidationError, validate_task
@@ -253,4 +282,20 @@ def validate_task_endpoint(
         validate_task(session, task_id, body.repo_path, actor=body.actor)
     except ValidationError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    # validate_task() calls transition() internally; fetch the event it emitted.
+    latest_event = (
+        session.execute(
+            select(EventORM).where(EventORM.task_id == task_id).order_by(EventORM.emitted_at.desc())
+        )
+        .scalars()
+        .first()
+    )
+    if latest_event is not None:
+        bg.add_task(
+            _try_publish,
+            str(latest_event.event_id),
+            latest_event.event_type,
+            task_id,
+            latest_event.payload,
+        )
     return TaskSchema.model_validate(session.get(TaskORM, task_id))

@@ -1,4 +1,4 @@
-.PHONY: up down migrate clean-db test lint demo
+.PHONY: up down migrate clean-db test lint demo dispatcher
 
 up:
 	docker compose up -d
@@ -20,3 +20,7 @@ lint:
 
 demo:
 	bash scripts/demo.sh
+
+dispatcher:
+	SANDBOX_REPO_PATH=$(SANDBOX_REPO_PATH) RUN_STORE_DIR=$(RUN_STORE_DIR) \
+	uv run python -m orchestrator.orchestrator.dispatcher
