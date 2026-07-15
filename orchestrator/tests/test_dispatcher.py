@@ -70,6 +70,7 @@ def _make_task(
     outputs: list[str] | None = None,
     retry_count: int = 0,
     budget_retries: int = 1,
+    risk_tier: int = 1,
 ):
     now = datetime.now(timezone.utc)
     with session_factory() as s:
@@ -83,7 +84,7 @@ def _make_task(
             inputs=[],
             outputs=outputs or [],
             acceptance=[],
-            risk_tier=1,
+            risk_tier=risk_tier,
             budget={"tokens": 10_000, "wall_clock_min": 5, "retries": budget_retries},
             retry_count=retry_count,
             created_at=now,
@@ -92,6 +93,23 @@ def _make_task(
         s.add(task)
         s.commit()
         return task.id
+
+
+def _make_run(session_factory, task_id: str, branch: str) -> None:
+    now = datetime.now(timezone.utc)
+    with session_factory() as s:
+        s.add(
+            Run(
+                run_id=uuid.uuid4(),
+                schema_version=1,
+                task_id=task_id,
+                agent_id="backend-agent",
+                branch=branch,
+                context_package_ref="/tmp/fake.json",
+                started_at=now,
+            )
+        )
+        s.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +237,61 @@ def test_recover_stale_republishes_assigned_task(
     messages = dispatcher._publisher._r.xrange(STREAM_KEY)
     assigned_msgs = [m for _, m in messages if m.get("task_id") == task_id]
     assert len(assigned_msgs) >= 1
+
+
+# ---------------------------------------------------------------------------
+# _on_task_validated — Tier 0 auto-merge
+# ---------------------------------------------------------------------------
+
+
+def test_auto_merge_tier0_on_validated(clean_db, redis_client, session_factory, dispatcher):
+    """A Tier 0 validated task should be auto-merged and closed without human approval."""
+    task_id = _make_task(session_factory, "TASK-AM01", "validated", risk_tier=0)
+    _make_run(session_factory, task_id, f"agent/backend/{task_id}")
+
+    with patch("orchestrator.orchestrator.dispatcher.httpx.Client") as mock_client:
+        mock_client.return_value.__enter__.return_value.post.return_value.raise_for_status.return_value = None
+        with session_factory() as session:
+            dispatcher._on_task_validated(task_id, session)
+
+    mock_client.return_value.__enter__.return_value.post.assert_called_once()
+    with session_factory() as s:
+        task = s.get(Task, task_id)
+        assert task.status == "closed"
+
+
+def test_no_auto_merge_tier1_on_validated(clean_db, redis_client, session_factory, dispatcher):
+    """A Tier 1 validated task should NOT be auto-merged; gateway is never called."""
+    task_id = _make_task(session_factory, "TASK-AM02", "validated", risk_tier=1)
+
+    with patch("orchestrator.orchestrator.dispatcher.httpx.Client") as mock_client:
+        with session_factory() as session:
+            dispatcher._on_task_validated(task_id, session)
+
+    mock_client.assert_not_called()
+    with session_factory() as s:
+        task = s.get(Task, task_id)
+        assert task.status == "validated"
+
+
+def test_auto_merge_failure_leaves_task_validated(
+    clean_db, redis_client, session_factory, dispatcher
+):
+    """If the gateway call fails, the task stays validated and no exception propagates."""
+    import httpx as _httpx
+
+    task_id = _make_task(session_factory, "TASK-AM03", "validated", risk_tier=0)
+
+    with patch("orchestrator.orchestrator.dispatcher.httpx.Client") as mock_client:
+        mock_client.return_value.__enter__.return_value.post.side_effect = _httpx.HTTPStatusError(
+            "fail", request=None, response=None
+        )
+        with session_factory() as session:
+            dispatcher._on_task_validated(task_id, session)  # must not raise
+
+    with session_factory() as s:
+        task = s.get(Task, task_id)
+        assert task.status == "validated"  # unchanged; human can merge manually
 
 
 # ---------------------------------------------------------------------------

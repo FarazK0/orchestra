@@ -1,8 +1,10 @@
 """Orchestrator event dispatcher: event-driven task dispatch and DAG scheduling.
 
 Subscribes to ``orchestra:events`` as consumer group ``"orchestrator"`` and reacts to:
-- TASK_ASSIGNED  -> create run context, check concurrency guard, launch agent subprocess
-- TASK_COMPLETED / TASK_VALIDATED / TASK_MERGED -> advance ready DAG successors to assigned
+- TASK_ASSIGNED   -> create run context, check concurrency guard, launch agent subprocess
+- TASK_VALIDATED  -> auto-merge Tier 0 tasks; advance ready DAG successors
+- TASK_COMPLETED / TASK_MERGED -> advance ready DAG successors to assigned
+- TASK_FAILED     -> retry within budget or escalate
 
 Run with:
     python -m orchestrator.orchestrator.dispatcher
@@ -14,6 +16,7 @@ Optional env vars (defaults shown):
     REDIS_URL       redis://localhost:6380
     DATABASE_URL    postgresql+psycopg://orchestra:orchestra@localhost:5433/orchestra
     RUN_STORE_DIR   /tmp/orchestra/runs
+    GATEWAY_URL     http://localhost:8081
 """
 
 from __future__ import annotations
@@ -24,6 +27,8 @@ import subprocess
 import sys
 import uuid
 from pathlib import Path
+
+import httpx
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -54,12 +59,14 @@ class Dispatcher:
         session_factory,
         repo_path: Path,
         store_dir: Path,
+        gateway_url: str = "http://localhost:8081",
     ) -> None:
         self._consumer = StreamConsumer("orchestrator", "dispatcher-0", session_factory, redis_url)
         self._publisher = StreamPublisher(redis_url)
         self._repo_path = repo_path
         self._store_dir = store_dir
         self._session_factory = session_factory
+        self._gateway_url = gateway_url
         self._tick = 0
 
     # ------------------------------------------------------------------
@@ -89,8 +96,10 @@ class Dispatcher:
         with self._session_factory() as session:
             if event_type == "TASK_ASSIGNED":
                 self._on_task_assigned(task_id, session)
-            elif event_type in ("TASK_COMPLETED", "TASK_VALIDATED", "TASK_MERGED"):
+            elif event_type in ("TASK_COMPLETED", "TASK_MERGED"):
                 self._on_task_completed(task_id, session)
+            elif event_type == "TASK_VALIDATED":
+                self._on_task_validated(task_id, session)
             elif event_type == "TASK_FAILED":
                 self._on_task_failed(task_id, session)
 
@@ -145,6 +154,54 @@ class Dispatcher:
                 {"reason": "retries_exhausted", "retry_count": task.retry_count},
             )
             log.warning("Task %s escalated after %d failed attempts", task_id, task.retry_count)
+
+    def _on_task_validated(self, task_id: str, session: Session) -> None:
+        """Auto-merge Tier 0 tasks; always advance DAG successors."""
+        task = session.get(Task, task_id)
+        if task is not None and task.status == "validated" and task.risk_tier == 0:
+            try:
+                self._auto_merge(task_id, task, session)
+            except Exception:
+                log.exception(
+                    "Auto-merge failed for task %s; task stays validated for manual merge",
+                    task_id,
+                )
+        self._on_task_completed(task_id, session)
+
+    def _auto_merge(self, task_id: str, task: Task, session: Session) -> None:
+        """Merge a Tier 0 validated task via the gateway without human approval."""
+        run = (
+            session.execute(
+                select(Run).where(Run.task_id == task_id).order_by(Run.started_at.desc())
+            )
+            .scalars()
+            .first()
+        )
+        branch = (
+            run.branch
+            if run is not None
+            else f"agent/{task.owner.removesuffix('-agent')}/{task_id}"
+        )
+        with httpx.Client(timeout=60.0) as http:
+            http.post(
+                f"{self._gateway_url}/git/merge",
+                json={
+                    "actor": "dispatcher",
+                    "task_id": task_id,
+                    "repo_path": str(self._repo_path),
+                    "branch": branch,
+                },
+            ).raise_for_status()
+        merged_ev = transition(session, task_id, "merged", actor="dispatcher")
+        closed_ev = transition(session, task_id, "closed", actor="dispatcher")
+        session.commit()
+        self._publisher.publish(
+            str(merged_ev.event_id), "TASK_MERGED", task_id, {"auto_merged": True}
+        )
+        self._publisher.publish(
+            str(closed_ev.event_id), "TASK_CLOSED", task_id, {"auto_merged": True}
+        )
+        log.info("Auto-merged Tier 0 task %s (branch %s)", task_id, branch)
 
     def _on_task_completed(self, task_id: str, session: Session) -> None:
         """Advance any DAG successors that are now fully unblocked."""
@@ -226,9 +283,10 @@ def main() -> None:
     store_dir = Path(store_dir_str)
     store_dir.mkdir(parents=True, exist_ok=True)
 
+    gateway_url = os.getenv("GATEWAY_URL", "http://localhost:8081")
     engine = get_engine(db_url)
     factory = get_session_factory(engine)
-    Dispatcher(redis_url, factory, repo_path, store_dir).start()
+    Dispatcher(redis_url, factory, repo_path, store_dir, gateway_url=gateway_url).start()
 
 
 if __name__ == "__main__":
