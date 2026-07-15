@@ -129,6 +129,7 @@ def create_run(
     run_id = uuid.uuid4()
     package = build_context_package(session, task_id, repo_path)
     package["run_id"] = str(run_id)
+    package["agent_instructions"]["agent_id"] = agent_id
 
     store_dir.mkdir(parents=True, exist_ok=True)
     package_path = store_dir / f"{run_id}.json"

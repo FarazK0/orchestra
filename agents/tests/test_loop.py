@@ -59,6 +59,7 @@ def _make_pkg(
         "input_artifacts": input_artifacts,
         "adrs": adrs or [],
         "agent_instructions": {
+            "agent_id": "backend-agent",
             "branch": f"agent/backend/{task_id}",
             "commit_prefix": f"[{task_id}]",
             "read_scope": inputs,

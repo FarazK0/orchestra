@@ -263,7 +263,7 @@ def run_agent_loop(
     Returns "completed" or "failed". The caller must commit the session.
     """
     task_id: str = context_package["task_id"]
-    agent_id: str = context_package["task"]["owner"]
+    agent_id: str = context_package["agent_instructions"]["agent_id"]
     instr: dict = context_package["agent_instructions"]
     branch: str = instr["branch"]
     commit_prefix: str = instr["commit_prefix"]

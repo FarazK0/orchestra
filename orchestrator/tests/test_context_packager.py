@@ -203,6 +203,7 @@ def test_create_run_writes_json_file(session, tmp_path):
     assert pkg["task_id"] == "TASK-802"
     assert pkg["run_id"] == str(run.run_id)
     assert pkg["schema_version"] == 1
+    assert pkg["agent_instructions"]["agent_id"] == "backend-agent"
 
 
 def test_create_run_creates_store_dir(session, tmp_path):
