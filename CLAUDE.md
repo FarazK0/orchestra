@@ -41,8 +41,9 @@ Retrospective: `docs/design/phase1-retro.md`.
 
 **Phase 2 in progress.** Redis Streams event bus (Step 14 done), DAG scheduling +
 event-driven dispatch (Step 15 done), frontend agent (Step 16 done), QA agent (Step 17 done),
-retry policy (Step 18 done), Tier 0 auto-merge (Step 19 done), multi-agent fan-out (Step 20 done).
-Steps remaining: end-to-end demo v2 (21), Phase 2 retro (22).
+retry policy (Step 18 done), Tier 0 auto-merge (Step 19 done), multi-agent fan-out (Step 20 done),
+end-to-end demo v2 (Step 21 done).
+Steps remaining: Phase 2 retro (22).
 
 Phase gates and weekly breakdown are in the design doc, Part 5.
 

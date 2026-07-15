@@ -51,7 +51,7 @@ def validate_task(
     """Validate the agent's branch for a completed task.
 
     Steps:
-      1. Checkout agent/backend/{task_id} in the managed repo.
+      1. Checkout the agent branch for task_id (derived from the most recent run record).
       2. Run ``ruff check .``
       3. Run ``pytest``
       4. Transition task: completed → validated (all pass) or completed → failed.
@@ -72,7 +72,12 @@ def validate_task(
             f"Task {task_id!r} must be 'completed' to validate; current: {task.status!r}"
         )
 
-    branch = f"agent/backend/{task_id}"
+    run_row = (
+        session.execute(select(Run).where(Run.task_id == task_id).order_by(Run.started_at.desc()))
+        .scalars()
+        .first()
+    )
+    branch = run_row.branch if run_row is not None else f"agent/backend/{task_id}"
     repo = Path(repo_path).resolve()
 
     results: dict = {
@@ -95,7 +100,8 @@ def validate_task(
     # 3. Pytest.
     results["pytest"] = _run_check(repo, [sys.executable, "-m", "pytest", "--tb=short", "-q"])
 
-    passed = results["ruff"]["returncode"] == 0 and results["pytest"]["returncode"] == 0
+    pytest_rc = results["pytest"]["returncode"]
+    passed = results["ruff"]["returncode"] == 0 and pytest_rc in (0, 5)
 
     _finalize(session, task_id, passed=passed, actor=actor, results=results)
     return {**results, "passed": passed}

@@ -247,9 +247,9 @@ def merge(
     \b
     The task must be in 'validated' status.
     Steps performed (in order):
-      1. git merge agent/backend/{task_id} → main  (via gateway, audited)
-      2. validated → merged                         (orchestrator transition)
-      3. merged   → closed                          (orchestrator transition)
+      1. git merge agent/<type>/{task_id} → main  (via gateway, audited)
+      2. validated → merged                        (orchestrator transition)
+      3. merged   → closed                         (orchestrator transition)
     """
     gw = gateway_url or os.getenv("GATEWAY_URL", "http://localhost:8081")
 
@@ -265,7 +265,8 @@ def merge(
         )
         raise typer.Exit(1)
 
-    branch = f"agent/backend/{task_id}"
+    agent_type = task["owner"].removesuffix("-agent")
+    branch = f"agent/{agent_type}/{task_id}"
 
     # 2. Git merge via gateway.
     with httpx.Client(base_url=gw, timeout=30.0) as gw_client:

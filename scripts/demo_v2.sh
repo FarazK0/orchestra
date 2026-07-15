@@ -206,16 +206,16 @@ fi
 # ── 8. Validate and merge frontend + QA tasks ─────────────────────────────────
 
 sep "Validating frontend task ($FE_ID)"
-uv run orchctl validate "$FE_ID" --repo "$REPO" || true
+uv run orchctl validate "$FE_ID" --repo "$REPO"
 
 sep "Merging frontend task ($FE_ID)"
-uv run orchctl merge "$FE_ID" --repo "$REPO" || true
+uv run orchctl merge "$FE_ID" --repo "$REPO"
 
 sep "Validating QA task ($QA_ID)"
-uv run orchctl validate "$QA_ID" --repo "$REPO" || true
+uv run orchctl validate "$QA_ID" --repo "$REPO"
 
 sep "Merging QA task ($QA_ID)"
-uv run orchctl merge "$QA_ID" --repo "$REPO" || true
+uv run orchctl merge "$QA_ID" --repo "$REPO"
 
 # ── 9. Summary ────────────────────────────────────────────────────────────────
 
