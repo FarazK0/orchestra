@@ -8,7 +8,15 @@ services:
     ports:
       - "5433:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ${HOME}/.orchestra/pgdata:/var/lib/postgresql/data
+    command: >
+      postgres
+      -c wal_level=minimal
+      -c max_wal_senders=0
+      -c max_wal_size=128MB
+      -c min_wal_size=32MB
+      -c checkpoint_completion_target=0.5
+      -c synchronous_commit=off
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U orchestra"]
       interval: 5s
@@ -20,6 +28,3 @@ services:
   #   image: redis:7
   #   ports:
   #     - "6380:6379"
-
-volumes:
-  pgdata:

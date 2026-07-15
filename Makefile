@@ -7,7 +7,7 @@ down:
 	docker compose down
 
 clean-db:
-	docker compose down && docker volume rm orchestra_pgdata && docker compose up -d && sleep 8 && uv run alembic -c infra/alembic.ini upgrade head
+	docker compose down && rm -rf $(HOME)/.orchestra/pgdata && docker compose up -d && until docker exec orchestra-postgres-1 pg_isready -U orchestra -q; do sleep 1; done && uv run alembic -c infra/alembic.ini upgrade head
 
 migrate:
 	uv run alembic -c infra/alembic.ini upgrade head
