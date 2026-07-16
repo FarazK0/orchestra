@@ -39,11 +39,12 @@ These hold from the first commit. Never violate them, even for a "quick test":
 gateway, single backend agent loop, validator (ruff + pytest), human merge flow.
 Retrospective: `docs/design/phase1-retro.md`.
 
-**Phase 2 in progress.** Redis Streams event bus (Step 14 done), DAG scheduling +
-event-driven dispatch (Step 15 done), frontend agent (Step 16 done), QA agent (Step 17 done),
-retry policy (Step 18 done), Tier 0 auto-merge (Step 19 done), multi-agent fan-out (Step 20 done),
-end-to-end demo v2 (Step 21 done).
-Steps remaining: Phase 2 retro (22).
+**Phase 2 complete.** Redis Streams event bus, DAG scheduling, multi-agent fan-out, retry,
+Tier 0 auto-merge, Claude Code as agent worker, interactive review loop, Phase 2 retro.
+Retrospective: `docs/design/phase2-retro.md`.
+
+**Phase 3 in progress.** Persistent root agent (Step 23 done): accepts change requests via
+`orchctl request`, decomposes into tasks, dispatches sub-agents.
 
 Phase gates and weekly breakdown are in the design doc, Part 5.
 
@@ -63,7 +64,9 @@ orchestra/
 │   └── tests/
 ├── agents/
 │   ├── shared/                # LLM client wrapper (token/cost logging), agent base loop
-│   └── backend/               # the Phase 1 backend agent (prompt + config)
+│   ├── root/                  # persistent root agent: accepts change requests, dispatches tasks
+│   ├── planner/               # one-shot planner: spec -> tasks (plan_utils.py shared with root)
+│   └── backend/               # Phase 1 backend agent (prompt + config)
 ├── schemas/                   # JSON Schemas: Task, Event, AgentIdentity, RunRecord,
 │                              #   Capability. Versioned via schema_version field.
 ├── cli/                       # orchctl: create-task, list, assign, approve, merge
@@ -107,9 +110,11 @@ All canonical commands live in the Makefile. Current targets:
 - `make lint` — ruff check + format --check
 - `make demo` — run the Phase 1 end-to-end demo (`scripts/demo.sh`; requires both services running and `ANTHROPIC_API_KEY`)
 - `make demo-v2` — run the Phase 2 three-task fan-out demo (`scripts/demo_v2.sh`)
+- `make root-agent` — start the root agent standalone (SANDBOX_REPO_PATH and AGENT_TYPE must be set)
 
 `orchctl` commands (run via `uv run orchctl`):
-- `create-task TITLE [--owner AGENT_ID] [--accept CRITERION] [--input PATH] [--output PATH] [--depends-on TASK-ID]` — create a task; valid `--owner` values: `backend-agent`, `frontend-agent`, `qa-agent`, `claude-code-agent`
+- `request "description" [--spec PATH]` — submit a change request to the root agent; the root agent decomposes it into tasks and dispatches agents automatically
+- `create-task TITLE [--owner AGENT_ID] [--accept CRITERION] [--input PATH] [--output PATH] [--depends-on TASK-ID]` — create a task manually; valid `--owner` values: `backend-agent`, `frontend-agent`, `qa-agent`, `claude-code-agent`
 - `list [--status STATUS]` — list tasks
 - `approve TASK-ID` — advance through human approval gate (created→assigned, validated→merged)
 - `run-task TASK-ID --repo PATH` — assemble context package and start run (assigned→running)

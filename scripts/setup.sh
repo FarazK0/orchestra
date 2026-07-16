@@ -212,6 +212,9 @@ _start_service gateway      uv run uvicorn gateway.gateway.app:app --port 8081
 _start_service dispatcher \
   env SANDBOX_REPO_PATH="$REPO" RUN_STORE_DIR="$RUN_STORE_DIR" \
   uv run python -m orchestrator.orchestrator.dispatcher
+_start_service root-agent \
+  env SANDBOX_REPO_PATH="$REPO" AGENT_TYPE="${AGENT_TYPE:-claude-code}" \
+  uv run python -m agents.root.main
 
 # ── 8. Health checks ──────────────────────────────────────────────────────────
 sep "Waiting for services"

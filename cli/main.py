@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import time
+import uuid
 from typing import Optional
 
 import httpx
@@ -337,6 +338,67 @@ def validate(
         pytest_rc = (v.get("pytest") or {}).get("returncode")
         typer.echo(f"  ruff   returncode={ruff_rc}")
         typer.echo(f"  pytest returncode={pytest_rc}")
+
+
+# ---------------------------------------------------------------------------
+# request — submit a change request to the root agent
+# ---------------------------------------------------------------------------
+
+
+@app.command("request")
+def request_change(
+    description: str = typer.Argument(..., help="Change request in plain language."),
+    spec: Optional[str] = typer.Option(
+        None,
+        "--spec",
+        "-s",
+        help="Repo-relative path to a spec file for additional context.",
+    ),
+    redis_url: str = typer.Option(
+        None, "--redis-url", help="Redis URL. Defaults to $REDIS_URL or redis://localhost:6380."
+    ),
+) -> None:
+    """Submit a change request to the persistent root agent.
+
+    \b
+    The root agent (started by setup.sh) consumes this request, decomposes it
+    into tasks using the planner, and dispatches sub-agents automatically.
+    Monitor progress with: orchctl list
+    """
+    try:
+        import redis as _redis
+
+        from orchestrator.orchestrator.streams import ROOT_STREAM_KEY, StreamPublisher
+    except ImportError as exc:
+        typer.echo(f"Error: {exc}. Is the venv active?", err=True)
+        raise typer.Exit(1)
+
+    r_url = redis_url or os.getenv("REDIS_URL", "redis://localhost:6380")
+
+    change_id = str(uuid.uuid4())
+    publisher = StreamPublisher(r_url)
+    try:
+        publisher.publish(
+            event_id=change_id,
+            event_type="CHANGE_REQUEST",
+            task_id=None,
+            payload={"description": description, "spec_path": spec or ""},
+            stream_key=ROOT_STREAM_KEY,
+        )
+    except _redis.exceptions.ConnectionError as exc:
+        typer.echo(f"Error: could not connect to Redis at {r_url}: {exc}", err=True)
+        typer.echo("Is the stack running? Try: make up", err=True)
+        raise typer.Exit(1)
+    finally:
+        publisher.close()
+
+    typer.echo(f"Change request submitted [{change_id[:8]}]:")
+    typer.echo(f"  {description}")
+    if spec:
+        typer.echo(f"  spec: {spec}")
+    typer.echo("")
+    typer.echo("The root agent will decompose this into tasks and dispatch agents.")
+    typer.echo("Monitor: uv run orchctl list")
 
 
 # ---------------------------------------------------------------------------

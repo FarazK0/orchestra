@@ -13,86 +13,24 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
 
 import httpx
 import typer
 from dotenv import load_dotenv
 
+from agents.planner.plan_utils import PLANNER_SYSTEM_PROMPT, parse_task_plan, topo_sort
 from agents.shared.llm import LLMClient
 
 load_dotenv()
 
 app = typer.Typer(name="planner", no_args_is_help=True)
 
-_SYSTEM_PROMPT = """\
-You are a project planner for the Orchestra multi-agent orchestration platform.
-Read the specification below and decompose the work into tasks for three agents:
+_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT
 
-  backend-agent      — server-side: APIs, data models, business logic, tests
-  frontend-agent     — client-side: HTML, CSS, JavaScript, single-page UI
-  qa-agent           — quality: test plans, QA reports, risk assessment
-  claude-code-agent  — general purpose: Claude Code CLI worker; handles backend,
-                       frontend, or QA work; preferred when a single capable agent
-                       can own the full implementation
-
-Return ONLY a JSON array — no explanation, no markdown code fences. Each element:
-{
-  "title":      "<short imperative phrase>",
-  "owner":      "backend-agent" | "frontend-agent" | "qa-agent",
-  "depends_on": ["<exact title of another task in this list>"],
-  "inputs":     ["<repo-relative file path this task reads>"],
-  "outputs":    ["<repo-relative file path this task writes>"],
-  "acceptance": ["<one acceptance criterion per string>"]
-}
-
-Rules:
-- backend-agent tasks have no depends_on (they are always roots).
-- frontend-agent and qa-agent tasks depend on the backend-agent task whose outputs
-  they consume — list those backend task titles in their depends_on.
-- Keep the plan to 3-5 tasks total; do not split work an agent can handle internally.
-- Do not include risk_tier; the planner will set it to 1 for all tasks.
-"""
-
-
-def _topo_sort(tasks: list[dict]) -> list[dict]:
-    """Return tasks in an order where every task appears after its dependencies."""
-    by_title = {t["title"]: t for t in tasks}
-    visited: set[str] = set()
-    result: list[dict] = []
-
-    def visit(t: dict) -> None:
-        if t["title"] in visited:
-            return
-        for dep in t.get("depends_on", []):
-            if dep in by_title:
-                visit(by_title[dep])
-        visited.add(t["title"])
-        result.append(t)
-
-    for t in tasks:
-        visit(t)
-    return result
-
-
-def _parse_task_plan(text: str) -> list[dict]:
-    """Extract and parse a JSON array from text.
-
-    Handles markdown fences and any conversational preamble/postamble that
-    models (including the claude CLI) may add around the JSON array.
-    """
-    text = text.strip()
-    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
-    text = re.sub(r"\s*```\s*$", "", text, flags=re.MULTILINE)
-    text = text.strip()
-    # If the text is not a bare array, extract from the first '[' to the last ']'.
-    if not text.startswith("["):
-        start = text.find("[")
-        end = text.rfind("]")
-        if start != -1 and end != -1:
-            text = text[start : end + 1]
-    return json.loads(text)
+# Aliases so existing internal call-sites below continue to work.
+_topo_sort = topo_sort
+_parse_task_plan = parse_task_plan
 
 
 def _submit(plan: list[dict], orch_url: str) -> None:

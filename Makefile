@@ -1,4 +1,4 @@
-.PHONY: up down migrate clean-db test lint demo demo-v2 dispatcher setup stop logs
+.PHONY: up down migrate clean-db test lint demo demo-v2 dispatcher root-agent setup stop logs
 
 up:
 	docker compose up -d
@@ -27,6 +27,10 @@ demo-v2:
 dispatcher:
 	SANDBOX_REPO_PATH=$(SANDBOX_REPO_PATH) RUN_STORE_DIR=$(RUN_STORE_DIR) \
 	uv run python -m orchestrator.orchestrator.dispatcher
+
+root-agent:
+	SANDBOX_REPO_PATH=$(SANDBOX_REPO_PATH) AGENT_TYPE=$(AGENT_TYPE) \
+	uv run python -m agents.root.main
 
 setup:
 	bash scripts/setup.sh

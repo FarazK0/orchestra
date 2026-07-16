@@ -31,6 +31,7 @@ from orchestrator.orchestrator.db import StreamDelivery
 
 
 STREAM_KEY = "orchestra:events"
+ROOT_STREAM_KEY = "root:requests"
 
 
 def get_redis_url() -> str:
@@ -49,6 +50,7 @@ class StreamPublisher:
         event_type: str,
         task_id: str | None,
         payload: dict[str, Any],
+        stream_key: str | None = None,
     ) -> str:
         """XADD to the stream. Returns the Redis message_id (e.g. '1234567890123-0')."""
         fields = {
@@ -57,7 +59,7 @@ class StreamPublisher:
             "task_id": task_id or "",
             "payload": json.dumps(payload),
         }
-        return self._r.xadd(STREAM_KEY, fields)
+        return self._r.xadd(stream_key or STREAM_KEY, fields)
 
     def close(self) -> None:
         self._r.close()
@@ -74,9 +76,10 @@ class StreamConsumer:
         consumer_name: str,
         session_factory: Callable[[], Session],
         redis_url: str | None = None,
+        stream_key: str | None = None,
     ) -> None:
         self._r = redis.Redis.from_url(redis_url or get_redis_url(), decode_responses=True)
-        self.stream_key = STREAM_KEY
+        self.stream_key = stream_key or STREAM_KEY
         self.group = consumer_group
         self.name = consumer_name
         self._session_factory = session_factory
