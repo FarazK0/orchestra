@@ -140,10 +140,13 @@ def main(
         instruction = _build_instruction(pkg, repo_path)
         log.info("Launching claude CLI (timeout 1800s)...")
 
+        # Drop ANTHROPIC_API_KEY so claude uses its own session auth, not API-key mode.
+        claude_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
         try:
             result = subprocess.run(
                 ["claude", "--dangerously-skip-permissions", "-p", instruction],
                 cwd=repo_path,
+                env=claude_env,
                 capture_output=True,
                 text=True,
                 timeout=1800,
