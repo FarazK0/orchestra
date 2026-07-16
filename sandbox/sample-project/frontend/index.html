@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Caesar Cipher Diary</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #f5f5f5; color: #222; }
+    h1 { font-size: 1.6rem; margin-bottom: 1.2rem; }
+    h2 { font-size: 1.2rem; margin-bottom: 0.8rem; }
+
+    /* Auth screen */
+    #auth-screen {
+      max-width: 360px;
+      margin: 6rem auto;
+      background: #fff;
+      border-radius: 8px;
+      padding: 2rem;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    #auth-screen input {
+      display: block;
+      width: 100%;
+      padding: 0.5rem 0.75rem;
+      margin-bottom: 0.75rem;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 1rem;
+    }
+    #auth-buttons { display: flex; gap: 0.5rem; }
+    #auth-buttons button {
+      flex: 1;
+      padding: 0.55rem;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.95rem;
+      background: #4a6fa5;
+      color: #fff;
+    }
+    #auth-buttons button:hover { background: #3a5f95; }
+    #auth-error {
+      margin-top: 0.75rem;
+      color: #c0392b;
+      font-size: 0.9rem;
+      min-height: 1.2em;
+    }
+
+    /* Diary screen */
+    #diary-screen { max-width: 700px; margin: 0 auto; padding: 1.5rem 1rem; }
+    #diary-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 1.5rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid #ddd;
+    }
+    #diary-header a { color: #4a6fa5; text-decoration: none; font-size: 0.9rem; }
+    #diary-header a:hover { text-decoration: underline; }
+
+    #compose {
+      background: #fff;
+      border-radius: 8px;
+      padding: 1.25rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+      margin-bottom: 1.5rem;
+    }
+    #entry-body {
+      width: 100%;
+      height: 100px;
+      padding: 0.5rem 0.75rem;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 0.95rem;
+      resize: vertical;
+      margin-bottom: 0.75rem;
+    }
+    #compose-controls { display: flex; gap: 0.75rem; align-items: center; }
+    #compose-controls label { font-size: 0.9rem; white-space: nowrap; }
+    #shift-select {
+      padding: 0.4rem 0.5rem;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 0.9rem;
+    }
+    #add-entry-btn {
+      margin-left: auto;
+      padding: 0.45rem 1.1rem;
+      background: #4a6fa5;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.95rem;
+    }
+    #add-entry-btn:hover { background: #3a5f95; }
+    #compose-error { color: #c0392b; font-size: 0.85rem; margin-top: 0.4rem; min-height: 1em; }
+
+    /* Entry list */
+    #entry-list { display: flex; flex-direction: column; gap: 1rem; }
+    .entry-card {
+      background: #fff;
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+    }
+    .entry-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.5rem;
+    }
+    .entry-date { font-size: 0.82rem; color: #777; }
+    .decrypt-btn {
+      padding: 0.3rem 0.75rem;
+      font-size: 0.82rem;
+      background: #e8f0fe;
+      color: #4a6fa5;
+      border: 1px solid #b3c4e8;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .decrypt-btn:hover { background: #d0e0fc; }
+    .entry-text {
+      font-family: monospace;
+      font-size: 0.92rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #333;
+    }
+    .entry-plaintext {
+      margin-top: 0.5rem;
+      padding-top: 0.5rem;
+      border-top: 1px solid #eee;
+      font-size: 0.92rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #2d6a2d;
+    }
+    #entries-loading { color: #888; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+
+<!-- Auth screen -->
+<div id="auth-screen" style="display:none">
+  <h1>Caesar Cipher Diary</h1>
+  <input id="username-input" type="text" placeholder="Username" autocomplete="username" />
+  <input id="pin-input" type="password" maxlength="5" placeholder="PIN (5 characters)" autocomplete="current-password" />
+  <div id="auth-buttons">
+    <button id="login-btn">Log in</button>
+    <button id="register-btn">Register</button>
+  </div>
+  <div id="auth-error"></div>
+</div>
+
+<!-- Diary screen -->
+<div id="diary-screen" style="display:none">
+  <div id="diary-header">
+    <span id="greeting"></span>
+    <a href="#" id="logout-link">Log out</a>
+  </div>
+
+  <div id="compose">
+    <h2>New entry</h2>
+    <textarea id="entry-body" placeholder="Write your diary entry..."></textarea>
+    <div id="compose-controls">
+      <label for="shift-select">Caesar shift:</label>
+      <select id="shift-select"></select>
+      <button id="add-entry-btn">Add entry</button>
+    </div>
+    <div id="compose-error"></div>
+  </div>
+
+  <h2>Your entries</h2>
+  <div id="entries-loading">Loading...</div>
+  <div id="entry-list"></div>
+</div>
+
+<script>
+  const TOKEN_KEY = 'diary_token';
+  const USER_KEY  = 'diary_username';
+
+  // Populate shift selector
+  const shiftSelect = document.getElementById('shift-select');
+  for (let i = 1; i <= 25; i++) {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = i;
+    if (i === 7) opt.selected = true;
+    shiftSelect.appendChild(opt);
+  }
+
+  function getToken() { return localStorage.getItem(TOKEN_KEY); }
+  function getUsername() { return localStorage.getItem(USER_KEY); }
+
+  function showAuth() {
+    document.getElementById('auth-screen').style.display = '';
+    document.getElementById('diary-screen').style.display = 'none';
+    document.getElementById('auth-error').textContent = '';
+    document.getElementById('username-input').value = '';
+    document.getElementById('pin-input').value = '';
+  }
+
+  function showDiary() {
+    document.getElementById('auth-screen').style.display = 'none';
+    document.getElementById('diary-screen').style.display = '';
+    document.getElementById('greeting').textContent = 'Hello, ' + getUsername();
+    loadEntries();
+  }
+
+  async function apiFetch(path, opts = {}) {
+    const token = getToken();
+    const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const resp = await fetch(path, { ...opts, headers });
+    return resp;
+  }
+
+  async function doAuth(action) {
+    const username = document.getElementById('username-input').value.trim();
+    const pin = document.getElementById('pin-input').value;
+    const errEl = document.getElementById('auth-error');
+    errEl.textContent = '';
+
+    const url = action === 'login' ? '/auth/login' : '/auth/register';
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, pin }),
+    });
+    const data = await resp.json();
+
+    if (!resp.ok) {
+      errEl.textContent = data.detail || 'An error occurred.';
+      return;
+    }
+
+    if (action === 'register') {
+      // Auto-login after registration
+      const loginResp = await fetch('/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, pin }),
+      });
+      const loginData = await loginResp.json();
+      if (!loginResp.ok) {
+        errEl.textContent = loginData.detail || 'Registration succeeded but login failed.';
+        return;
+      }
+      localStorage.setItem(TOKEN_KEY, loginData.token);
+    } else {
+      localStorage.setItem(TOKEN_KEY, data.token);
+    }
+
+    localStorage.setItem(USER_KEY, username);
+    showDiary();
+  }
+
+  document.getElementById('login-btn').addEventListener('click', () => doAuth('login'));
+  document.getElementById('register-btn').addEventListener('click', () => doAuth('register'));
+  document.getElementById('pin-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') doAuth('login');
+  });
+
+  document.getElementById('logout-link').addEventListener('click', async (e) => {
+    e.preventDefault();
+    try { await apiFetch('/auth/logout', { method: 'POST' }); } catch (_) {}
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USER_KEY);
+    showAuth();
+  });
+
+  document.getElementById('add-entry-btn').addEventListener('click', async () => {
+    const body = document.getElementById('entry-body').value;
+    const shift = parseInt(shiftSelect.value, 10);
+    const errEl = document.getElementById('compose-error');
+    errEl.textContent = '';
+
+    const resp = await apiFetch('/entries', {
+      method: 'POST',
+      body: JSON.stringify({ body, shift }),
+    });
+    const data = await resp.json();
+
+    if (!resp.ok) {
+      errEl.textContent = data.detail || 'Failed to add entry.';
+      return;
+    }
+
+    document.getElementById('entry-body').value = '';
+    prependEntry(data);
+  });
+
+  async function loadEntries() {
+    const loadingEl = document.getElementById('entries-loading');
+    const listEl = document.getElementById('entry-list');
+    loadingEl.style.display = '';
+    listEl.innerHTML = '';
+
+    const resp = await apiFetch('/entries');
+    loadingEl.style.display = 'none';
+
+    if (!resp.ok) {
+      if (resp.status === 401) { showAuth(); return; }
+      listEl.textContent = 'Failed to load entries.';
+      return;
+    }
+
+    const entries = await resp.json();
+    if (entries.length === 0) {
+      listEl.textContent = 'No entries yet. Write your first one above!';
+      return;
+    }
+    entries.forEach(renderEntry);
+  }
+
+  function renderEntry(entry) {
+    const listEl = document.getElementById('entry-list');
+    const card = buildEntryCard(entry);
+    listEl.appendChild(card);
+  }
+
+  function prependEntry(entry) {
+    const listEl = document.getElementById('entry-list');
+    if (listEl.textContent.trim() === 'No entries yet. Write your first one above!') {
+      listEl.textContent = '';
+    }
+    const card = buildEntryCard(entry);
+    listEl.prepend(card);
+  }
+
+  function buildEntryCard(entry) {
+    const card = document.createElement('div');
+    card.className = 'entry-card';
+    card.dataset.id = entry.id;
+
+    const meta = document.createElement('div');
+    meta.className = 'entry-meta';
+
+    const date = document.createElement('span');
+    date.className = 'entry-date';
+    date.textContent = new Date(entry.created_at).toLocaleString();
+
+    const btn = document.createElement('button');
+    btn.className = 'decrypt-btn';
+    btn.textContent = 'Decrypt';
+    btn.addEventListener('click', () => decryptEntry(entry.id, card));
+
+    meta.appendChild(date);
+    meta.appendChild(btn);
+
+    const text = document.createElement('div');
+    text.className = 'entry-text';
+    text.textContent = entry.ciphertext;
+
+    card.appendChild(meta);
+    card.appendChild(text);
+    return card;
+  }
+
+  async function decryptEntry(id, card) {
+    const resp = await apiFetch('/entries/' + id + '?decrypt=true');
+    if (!resp.ok) return;
+    const data = await resp.json();
+
+    let plain = card.querySelector('.entry-plaintext');
+    if (!plain) {
+      plain = document.createElement('div');
+      plain.className = 'entry-plaintext';
+      card.appendChild(plain);
+    }
+    plain.textContent = data.plaintext;
+
+    const btn = card.querySelector('.decrypt-btn');
+    btn.textContent = 'Decrypted';
+    btn.disabled = true;
+  }
+
+  // Bootstrap
+  if (getToken()) {
+    showDiary();
+  } else {
+    showAuth();
+  }
+</script>
+</body>
+</html>
