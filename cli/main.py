@@ -462,6 +462,19 @@ def _show_validation(v: dict) -> None:
                     break
 
 
+def _cancel_task(task_id: str, reason: str = "human cancelled") -> bool:
+    with _client() as c:
+        r = c.post(
+            f"/tasks/{task_id}/transition",
+            json={"new_status": "cancelled", "actor": "human", "payload": {"reason": reason}},
+        )
+    if r.is_error:
+        typer.echo(f"  {_r('Cancel error')}: {r.text}", err=True)
+        return False
+    typer.echo(f"  {_d('Cancelled')} {task_id}")
+    return True
+
+
 def _do_merge(task: dict, repo: str, gw: str) -> bool:
     task_id = task["id"]
     agent_type = task["owner"].removesuffix("-agent")
@@ -477,7 +490,18 @@ def _do_merge(task: dict, repo: str, gw: str) -> bool:
             detail = resp.json().get("detail", resp.text)
         except Exception:
             detail = resp.text
+        # Branch no longer exists (deleted after sandbox reset) — offer to cancel.
+        branch_gone = "not something we can merge" in detail or "did not match" in detail
         typer.echo(f"  {_r('Merge error')}: {detail}", err=True)
+        if branch_gone:
+            typer.echo(f"  {_d('Branch')} {branch} {_d('no longer exists.')}")
+            choice = (
+                typer.prompt(f"  {_b('[c]')}ancel task   {_b('[s]')}kip", default="c")
+                .strip()
+                .lower()
+            )
+            if choice.startswith("c"):
+                _cancel_task(task_id, reason="branch deleted")
         return False
     sha = resp.json().get("sha", "?")
 
@@ -553,7 +577,42 @@ def _handle_task(task: dict, repo: str, gw: str) -> None:
         typer.echo(f"\n  {_r('Failed.')} The dispatcher will retry or escalate.")
 
     elif status == "escalated":
-        typer.echo(f"\n  {_r('Escalated.')} Retry budget exhausted — manual intervention needed.")
+        typer.echo(f"\n  {_r('Escalated.')} Retry budget exhausted.")
+        choice = (
+            typer.prompt(f"  {_b('[c]')}ancel task   {_b('[s]')}kip", default="s").strip().lower()
+        )
+        if choice.startswith("c"):
+            _cancel_task(task_id, reason="escalated, human cancelled")
+
+
+# ---------------------------------------------------------------------------
+# cancel
+# ---------------------------------------------------------------------------
+
+
+@app.command("cancel")
+def cancel(
+    task_id: str = typer.Argument(..., help="Task ID to cancel, e.g. TASK-007."),
+    reason: str = typer.Option("human cancelled", help="Reason recorded in the audit log."),
+) -> None:
+    """Cancel a task from any non-terminal state.
+
+    \b
+    Valid from: created, assigned, running, completed, validated, failed, escalated.
+    Use this to close stale tasks whose agent branches have been deleted.
+    """
+    with _client() as c:
+        resp = c.get(f"/tasks/{task_id}")
+    _handle_error(resp)
+    task = resp.json()
+
+    with _client() as c:
+        resp = c.post(
+            f"/tasks/{task_id}/transition",
+            json={"new_status": "cancelled", "actor": "human", "payload": {"reason": reason}},
+        )
+    _handle_error(resp)
+    typer.echo(f"Cancelled {task_id}: {task['status']} → cancelled  ({task['title']!r})")
 
 
 @app.command("review")
@@ -577,6 +636,7 @@ def review(
     typer.echo(f"  {_d('repo:')} {repo}  {_d('poll:')} {poll}s\n")
 
     _TERMINAL = {"closed", "failed", "escalated", "cancelled"}
+    _ACTIVE = {"created", "assigned", "running", "completed", "validated"}
     _PENDING = {"completed", "validated"}
 
     try:

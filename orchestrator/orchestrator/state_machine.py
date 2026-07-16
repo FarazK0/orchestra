@@ -33,11 +33,15 @@ TRANSITIONS: dict[tuple[str, str], str] = {
     ("merged", "closed"): "TASK_CLOSED",
     ("failed", "running"): "TASK_RETRIED",
     ("failed", "escalated"): "TASK_ESCALATED",
-    ("escalated", "cancelled"): "TASK_CANCELLED",
     ("escalated", "running"): "TASK_RESET",
-    # Human can cancel a task before it runs
+    # Cancel from any non-terminal state
     ("created", "cancelled"): "TASK_CANCELLED",
     ("assigned", "cancelled"): "TASK_CANCELLED",
+    ("running", "cancelled"): "TASK_CANCELLED",
+    ("completed", "cancelled"): "TASK_CANCELLED",
+    ("validated", "cancelled"): "TASK_CANCELLED",
+    ("failed", "cancelled"): "TASK_CANCELLED",
+    ("escalated", "cancelled"): "TASK_CANCELLED",
 }
 
 # All reachable statuses (used for validation)
