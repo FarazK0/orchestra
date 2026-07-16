@@ -424,6 +424,12 @@ def git_merge(body: GitMerge, session: SessionDep) -> GitMergeResponse:
 
     repo = Path(body.repo_path)
 
+    # Clean the working tree before switching branches.
+    # Validation (ruff/pytest) leaves modified tracked files (.pyc) and untracked
+    # artifacts that would block the checkout. Reset and clean them first.
+    _git(["checkout", "--", "."], cwd=repo)
+    _git(["clean", "-fd"], cwd=repo)
+
     # Switch to the target branch before merging.
     checkout = _git(["checkout", body.target_branch], cwd=repo)
     if checkout.returncode != 0:

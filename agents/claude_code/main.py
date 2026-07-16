@@ -173,7 +173,11 @@ def main(
             cwd=repo_path,
             text=True,
         )
-        changed_paths = [line[3:].strip() for line in status_out.splitlines() if line.strip()]
+        changed_paths = [
+            line[3:].strip()
+            for line in status_out.splitlines()
+            if line.strip() and "__pycache__" not in line and not line[3:].strip().endswith(".pyc")
+        ]
 
         if not changed_paths:
             log.warning("claude exited 0 but no files changed; marking task failed")

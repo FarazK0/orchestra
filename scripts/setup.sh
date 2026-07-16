@@ -300,6 +300,7 @@ if [ -n "$SPEC" ]; then
     # Claude Code path: run claude CLI to decompose the spec -- no API key needed.
     _AUTO_PLAN="$RUN_STORE_DIR/auto-plan.json"
     echo "  Using claude CLI to decompose spec (no API key required)..."
+    echo "  $(_dim 'Reading spec and planning tasks — usually takes 30-90 seconds...')"
     env -u ANTHROPIC_API_KEY claude --dangerously-skip-permissions -p \
       "Read the spec file at $REPO/$SPEC and produce an Orchestra task plan.
 Return ONLY a JSON array, no explanation or markdown. Each element:
@@ -312,7 +313,7 @@ Return ONLY a JSON array, no explanation or markdown. Each element:
   \"acceptance\": [\"<one acceptance criterion>\"]
 }
 Rules: keep to 1-4 tasks; tasks with no dependencies have empty depends_on; be specific." \
-      > "$_AUTO_PLAN"
+      </dev/null > "$_AUTO_PLAN"
     PLAN="$_AUTO_PLAN"
     SPEC=""
     echo "  Plan written to $_AUTO_PLAN"
