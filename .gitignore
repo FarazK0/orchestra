@@ -1,5 +1,6 @@
 .env
 .claude/
+!.claude/commands/
 __pycache__/
 *.pyc
 .venv/
