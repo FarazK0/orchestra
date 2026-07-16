@@ -295,25 +295,49 @@ fi
 if [ -n "$SPEC" ]; then
   echo ""
   sep "Generating task plan from spec  $(_dim "($SPEC)")"
-  # Spec mode calls the LLM via ANTHROPIC_API_KEY. Prompt if still unset.
-  if ! grep -qE "^ANTHROPIC_API_KEY=.+" "$ROOT/.env"; then
-    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-      sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}|" "$ROOT/.env"
-      set -a; source "$ROOT/.env"; set +a
-    else
-      printf "  Enter your Anthropic API key for spec-mode planner (sk-ant-...): "
-      read -r _key
-      sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${_key}|" "$ROOT/.env"
-      set -a; source "$ROOT/.env"; set +a
+
+  if [ "${AGENT_TYPE:-claude-code}" = "claude-code" ]; then
+    # Claude Code path: run claude CLI to decompose the spec -- no API key needed.
+    _AUTO_PLAN="$RUN_STORE_DIR/auto-plan.json"
+    echo "  Using claude CLI to decompose spec (no API key required)..."
+    claude --dangerously-skip-permissions -p \
+      "Read the spec file at $REPO/$SPEC and produce an Orchestra task plan.
+Return ONLY a JSON array, no explanation or markdown. Each element:
+{
+  \"title\": \"<short imperative phrase>\",
+  \"owner\": \"claude-code-agent\",
+  \"depends_on\": [\"<exact title of a task in this list>\"],
+  \"inputs\": [\"<repo-relative path to read>\"],
+  \"outputs\": [\"<repo-relative path to write>\"],
+  \"acceptance\": [\"<one acceptance criterion>\"]
+}
+Rules: keep to 1-4 tasks; tasks with no dependencies have empty depends_on; be specific." \
+      > "$_AUTO_PLAN"
+    PLAN="$_AUTO_PLAN"
+    SPEC=""
+    echo "  Plan written to $_AUTO_PLAN"
+  else
+    # Python agent path: call the LLM planner (needs ANTHROPIC_API_KEY).
+    if ! grep -qE "^ANTHROPIC_API_KEY=.+" "$ROOT/.env"; then
+      if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}|" "$ROOT/.env"
+        set -a; source "$ROOT/.env"; set +a
+      else
+        printf "  Enter your Anthropic API key (sk-ant-...): "
+        read -r _key
+        sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${_key}|" "$ROOT/.env"
+        set -a; source "$ROOT/.env"; set +a
+      fi
     fi
+    uv run python -m agents.planner.main \
+      --spec "$SPEC" \
+      --repo "$REPO" \
+      --orchestrator-url "$ORCH_URL"
   fi
-  uv run python -m agents.planner.main \
-    --spec "$SPEC" \
-    --repo "$REPO" \
-    --orchestrator-url "$ORCH_URL"
-elif [ -n "$PLAN" ]; then
-  echo ""
-  sep "Submitting pre-built task plan  $(_dim "($PLAN)")"
+fi
+
+if [ -n "$PLAN" ]; then
+  [ -z "$SPEC" ] && { echo ""; sep "Submitting pre-built task plan  $(_dim "($PLAN)")"; }
   uv run python -m agents.planner.main \
     --plan "$PLAN" \
     --repo "$REPO" \

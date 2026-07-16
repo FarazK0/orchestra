@@ -77,11 +77,22 @@ def _topo_sort(tasks: list[dict]) -> list[dict]:
 
 
 def _parse_task_plan(text: str) -> list[dict]:
-    """Extract and parse a JSON array from text (handles stray markdown fences)."""
+    """Extract and parse a JSON array from text.
+
+    Handles markdown fences and any conversational preamble/postamble that
+    models (including the claude CLI) may add around the JSON array.
+    """
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"\s*```\s*$", "", text, flags=re.MULTILINE)
-    return json.loads(text.strip())
+    text = text.strip()
+    # If the text is not a bare array, extract from the first '[' to the last ']'.
+    if not text.startswith("["):
+        start = text.find("[")
+        end = text.rfind("]")
+        if start != -1 and end != -1:
+            text = text[start : end + 1]
+    return json.loads(text)
 
 
 def _submit(plan: list[dict], orch_url: str) -> None:
