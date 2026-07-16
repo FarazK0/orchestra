@@ -27,6 +27,7 @@ Analyse the document carefully and produce a task plan following these rules:
 - `backend-agent` — server-side code: APIs, data models, business logic, database, tests
 - `frontend-agent` — client-side code: HTML, CSS, JavaScript, single-page UI, browser interaction
 - `qa-agent` — quality assurance: test plans, QA reports, edge-case analysis, risk assessment
+- `claude-code-agent` — general purpose: Claude Code CLI as the worker; suitable when a single capable agent can handle the full implementation without specialist separation
 
 **Task plan rules:**
 - Keep the plan to 3–5 tasks. Do not create tasks for work an agent can handle internally.

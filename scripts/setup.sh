@@ -77,6 +77,12 @@ for cmd in python3 uv docker git curl; do
   fi
 done
 
+if command -v claude &>/dev/null; then
+  echo "  claude CLI: $(_green 'found')  $(_dim '(claude-code-agent tasks will use this)')"
+else
+  echo "  claude CLI: $(_dim 'not found')  $(_dim '(needed for claude-code-agent tasks; run: npm install -g @anthropic-ai/claude-code)')"
+fi
+
 if python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,12) else 1)"; then
   PY_VER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
   echo "  Python $PY_VER: $(_green 'OK')"
@@ -98,24 +104,49 @@ if [ ! -f "$ROOT/.env" ]; then
   echo "  Created .env from .env.example"
 fi
 
-if ! grep -qE "^ANTHROPIC_API_KEY=.+" "$ROOT/.env"; then
-  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}|" "$ROOT/.env"
-    echo "  ANTHROPIC_API_KEY: written from environment"
-  else
-    echo ""
-    printf "  Enter your Anthropic API key (sk-ant-...): "
-    read -r _key
-    sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${_key}|" "$ROOT/.env"
-    echo "  ANTHROPIC_API_KEY: saved"
-  fi
-fi
-
 set -a
 # shellcheck disable=SC1091
 source "$ROOT/.env"
 set +a
 echo "  .env loaded"
+
+# ── 3a. Agent type ────────────────────────────────────────────────────────────
+AGENT_TYPE="claude-code"  # default; overridden below if Python loops chosen
+
+sep "Choosing agent type"
+echo ""
+echo "  $(_cyan '1')  $(_bold 'Claude Code agent')  $(_dim '(recommended)')"
+echo "     $(_dim 'Orchestrates the claude CLI you are already running.')"
+echo "     $(_dim 'No ANTHROPIC_API_KEY needed. Tasks run as: claude-code-agent')"
+echo ""
+echo "  $(_cyan '2')  $(_bold 'Custom Python agents')  $(_dim '(backend / frontend / QA loops)')"
+echo "     $(_dim 'Call the Anthropic API directly. Requires ANTHROPIC_API_KEY in .env.')"
+echo "     $(_dim 'Tasks run as: backend-agent, frontend-agent, qa-agent')"
+echo ""
+printf "  Choice [1/2]: "
+read -r _agent_choice
+
+if [ "${_agent_choice:-1}" = "2" ]; then
+  AGENT_TYPE="python"
+  if ! grep -qE "^ANTHROPIC_API_KEY=.+" "$ROOT/.env"; then
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+      sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}|" "$ROOT/.env"
+      set -a; source "$ROOT/.env"; set +a
+      echo "  ANTHROPIC_API_KEY: written from environment"
+    else
+      echo ""
+      printf "  Enter your Anthropic API key (sk-ant-...): "
+      read -r _key
+      sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${_key}|" "$ROOT/.env"
+      set -a; source "$ROOT/.env"; set +a
+      echo "  ANTHROPIC_API_KEY: saved"
+    fi
+  else
+    echo "  ANTHROPIC_API_KEY: $(_green 'already set')"
+  fi
+else
+  echo "  Agent type: $(_green 'claude-code-agent')  $(_dim '(no API key required)')"
+fi
 
 # ── 4. Docker infrastructure ───────────────────────────────────────────────────
 sep "Starting Docker services  $(_dim '(Postgres 5433 · Redis 6380)')"
@@ -264,6 +295,18 @@ fi
 if [ -n "$SPEC" ]; then
   echo ""
   sep "Generating task plan from spec  $(_dim "($SPEC)")"
+  # Spec mode calls the LLM via ANTHROPIC_API_KEY. Prompt if still unset.
+  if ! grep -qE "^ANTHROPIC_API_KEY=.+" "$ROOT/.env"; then
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+      sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}|" "$ROOT/.env"
+      set -a; source "$ROOT/.env"; set +a
+    else
+      printf "  Enter your Anthropic API key for spec-mode planner (sk-ant-...): "
+      read -r _key
+      sed -i "s|^ANTHROPIC_API_KEY=.*|ANTHROPIC_API_KEY=${_key}|" "$ROOT/.env"
+      set -a; source "$ROOT/.env"; set +a
+    fi
+  fi
   uv run python -m agents.planner.main \
     --spec "$SPEC" \
     --repo "$REPO" \

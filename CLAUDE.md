@@ -109,7 +109,7 @@ All canonical commands live in the Makefile. Current targets:
 - `make demo-v2` — run the Phase 2 three-task fan-out demo (`scripts/demo_v2.sh`)
 
 `orchctl` commands (run via `uv run orchctl`):
-- `create-task TITLE [--owner AGENT_ID] [--accept CRITERION] [--input PATH] [--output PATH] [--depends-on TASK-ID]` — create a task; valid `--owner` values: `backend-agent`, `frontend-agent`, `qa-agent`
+- `create-task TITLE [--owner AGENT_ID] [--accept CRITERION] [--input PATH] [--output PATH] [--depends-on TASK-ID]` — create a task; valid `--owner` values: `backend-agent`, `frontend-agent`, `qa-agent`, `claude-code-agent`
 - `list [--status STATUS]` — list tasks
 - `approve TASK-ID` — advance through human approval gate (created→assigned, validated→merged)
 - `run-task TASK-ID --repo PATH` — assemble context package and start run (assigned→running)
@@ -125,15 +125,31 @@ Gateway service (port 8081) — start with `uvicorn gateway.gateway.app:app --po
 - `POST /git/commit` — stage paths and commit (audited)
 - `POST /git/merge` — merge agent branch into target branch (requires validated status, audited)
 
-Backend agent (requires `ANTHROPIC_API_KEY` and both services running):
-```
-python -m agents.backend.main \
-  --context /path/to/<run_id>.json \
-  --run-id <uuid> \
-  [--repo PATH] [--gateway-url URL] [--orchestrator-url URL]
-```
-Defaults: `--repo $SANDBOX_REPO_PATH`, `--gateway-url http://localhost:8081`,
-`--orchestrator-url http://localhost:8080`. Exits 0 on success, 1 on failure.
+**Agent workers — two modes:**
+
+1. **Python loop agents** (`backend-agent`, `frontend-agent`, `qa-agent`): custom Python loops
+   that call the Anthropic API via `agents/shared/loop.py`. Require `ANTHROPIC_API_KEY` in `.env`.
+   ```
+   python -m agents.backend.main \
+     --context /path/to/<run_id>.json \
+     --run-id <uuid> \
+     [--repo PATH] [--gateway-url URL] [--orchestrator-url URL]
+   ```
+
+2. **Claude Code agent** (`claude-code-agent`): launches the `claude` CLI as a subprocess.
+   Requires the `claude` CLI to be installed and authenticated (`claude login`). Does NOT
+   need `ANTHROPIC_API_KEY`. Branch creation and git commit still go through the gateway;
+   individual file writes are not individually audited (Phase 3 revisit).
+   ```
+   python -m agents.claude_code.main \
+     --context /path/to/<run_id>.json \
+     --run-id <uuid> \
+     [--repo PATH] [--gateway-url URL] [--orchestrator-url URL]
+   ```
+
+All agent workers: defaults are `--repo $SANDBOX_REPO_PATH`, `--gateway-url http://localhost:8081`,
+`--orchestrator-url http://localhost:8080`. Exit 0 on success, 1 on failure. The dispatcher
+launches agents automatically; manual invocation is for debugging only.
 
 If you add a workflow, add a Make target for it and document it here.
 

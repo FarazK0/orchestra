@@ -30,9 +30,12 @@ _SYSTEM_PROMPT = """\
 You are a project planner for the Orchestra multi-agent orchestration platform.
 Read the specification below and decompose the work into tasks for three agents:
 
-  backend-agent   — server-side: APIs, data models, business logic, tests
-  frontend-agent  — client-side: HTML, CSS, JavaScript, single-page UI
-  qa-agent        — quality: test plans, QA reports, risk assessment
+  backend-agent      — server-side: APIs, data models, business logic, tests
+  frontend-agent     — client-side: HTML, CSS, JavaScript, single-page UI
+  qa-agent           — quality: test plans, QA reports, risk assessment
+  claude-code-agent  — general purpose: Claude Code CLI worker; handles backend,
+                       frontend, or QA work; preferred when a single capable agent
+                       can own the full implementation
 
 Return ONLY a JSON array — no explanation, no markdown code fences. Each element:
 {

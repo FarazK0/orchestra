@@ -49,6 +49,7 @@ _AGENT_MODULES: dict[str, str] = {
     "backend-agent": "agents.backend.main",
     "frontend-agent": "agents.frontend.main",
     "qa-agent": "agents.qa.main",
+    "claude-code-agent": "agents.claude_code.main",
 }
 
 
