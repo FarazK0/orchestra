@@ -343,3 +343,24 @@ if [ -n "$PLAN" ]; then
     --repo "$REPO" \
     --orchestrator-url "$ORCH_URL"
 fi
+
+# ── 12. Offer interactive review loop ─────────────────────────────────────────
+if [ -n "$SPEC" ] || [ -n "$PLAN" ]; then
+  echo ""
+  echo "  $(_dim '════════════════════════════════════════════════════════════')"
+  echo "  Tasks are running. When agents finish, you need to approve and merge their work."
+  echo ""
+  echo "  $(_cyan 'a')  Start the review loop now  $(_dim '(waits for agents, validates, prompts approval)')"
+  echo "  $(_cyan 'b')  Exit and review later with:  $(_bold 'uv run orchctl review --repo') $REPO"
+  echo ""
+  printf "  Choice [a/b]: "
+  read -r _review_choice
+  if [ "${_review_choice:-a}" != "b" ]; then
+    echo ""
+    uv run python -m cli.main review --repo "$REPO"
+  else
+    echo ""
+    echo "  When ready:"
+    echo "    $(_cyan "uv run orchctl review --repo $REPO")"
+  fi
+fi

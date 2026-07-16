@@ -6,11 +6,13 @@ create-task   Create a new task in the orchestrator
 list          List tasks, optionally filtered by status
 approve       Advance a task through the current human approval gate
 run-task      Assemble the context package and start an agent run
+review        Interactive approval loop: auto-validate and prompt for merge
 """
 
 from __future__ import annotations
 
 import os
+import time
 from typing import Optional
 
 import httpx
@@ -326,8 +328,231 @@ def validate(
             json={"repo_path": repo, "actor": actor},
         )
     _handle_error(resp)
-    task = resp.json()
+    body = resp.json()
+    task = body["task"]
+    v = body.get("validation", {})
     typer.echo(f"Validated {task_id}: status is now {task['status']!r}")
+    if v:
+        ruff_rc = (v.get("ruff") or {}).get("returncode")
+        pytest_rc = (v.get("pytest") or {}).get("returncode")
+        typer.echo(f"  ruff   returncode={ruff_rc}")
+        typer.echo(f"  pytest returncode={pytest_rc}")
+
+
+# ---------------------------------------------------------------------------
+# review — interactive approval loop
+# ---------------------------------------------------------------------------
+
+_G = "\033[32m"  # green
+_R = "\033[31m"  # red
+_B = "\033[1m"  # bold
+_D = "\033[2m"  # dim
+_X = "\033[0m"  # reset
+
+
+def _g(s: str) -> str:
+    return f"{_G}{s}{_X}"
+
+
+def _r(s: str) -> str:
+    return f"{_R}{s}{_X}"
+
+
+def _b(s: str) -> str:
+    return f"{_B}{s}{_X}"
+
+
+def _d(s: str) -> str:
+    return f"{_D}{s}{_X}"
+
+
+def _show_validation(v: dict) -> None:
+    ruff = v.get("ruff") or {}
+    pytest_ = v.get("pytest") or {}
+
+    ruff_ok = ruff.get("returncode") == 0
+    pytest_rc = pytest_.get("returncode")
+    pytest_ok = pytest_rc in (0, 5) if pytest_rc is not None else v.get("passed", False)
+
+    typer.echo(f"  ruff   {_g('PASS') if ruff_ok else _r('FAIL')}")
+    if not ruff_ok and ruff.get("stdout"):
+        for line in ruff["stdout"].splitlines()[:8]:
+            typer.echo(f"         {line}")
+
+    typer.echo(f"  pytest {_g('PASS') if pytest_ok else _r('FAIL')}")
+    if pytest_.get("stdout"):
+        lines = pytest_["stdout"].splitlines()
+        # Always show the summary line
+        for line in reversed(lines):
+            stripped = line.strip()
+            if stripped and any(k in stripped for k in ("passed", "failed", "error", "no tests")):
+                typer.echo(f"         {stripped}")
+                break
+        # On failure, show the short failure details too
+        if not pytest_ok:
+            in_fail = False
+            for line in lines:
+                if line.startswith("FAILED") or line.startswith("ERROR"):
+                    in_fail = True
+                if in_fail:
+                    typer.echo(f"         {_r(line)}")
+                if in_fail and not line.strip():
+                    break
+
+
+def _do_merge(task: dict, repo: str, gw: str) -> bool:
+    task_id = task["id"]
+    agent_type = task["owner"].removesuffix("-agent")
+    branch = f"agent/{agent_type}/{task_id}"
+
+    with httpx.Client(base_url=gw, timeout=30.0) as gw_client:
+        resp = gw_client.post(
+            "/git/merge",
+            json={"actor": "human", "task_id": task_id, "repo_path": repo, "branch": branch},
+        )
+    if resp.is_error:
+        try:
+            detail = resp.json().get("detail", resp.text)
+        except Exception:
+            detail = resp.text
+        typer.echo(f"  {_r('Merge error')}: {detail}", err=True)
+        return False
+    sha = resp.json().get("sha", "?")
+
+    with _client() as c:
+        r = c.post(f"/tasks/{task_id}/transition", json={"new_status": "merged", "actor": "human"})
+    if r.is_error:
+        typer.echo(f"  {_r('Transition error')}: {r.text}", err=True)
+        return False
+
+    with _client() as c:
+        r = c.post(f"/tasks/{task_id}/transition", json={"new_status": "closed", "actor": "human"})
+    if r.is_error:
+        typer.echo(f"  {_r('Close error')}: {r.text}", err=True)
+        return False
+
+    typer.echo(f"  {_g('Merged')} {branch} → main  sha:{sha[:8]}  {_d('task closed')}")
+    return True
+
+
+def _handle_task(task: dict, repo: str, gw: str) -> None:
+    task_id = task["id"]
+    status = task["status"]
+
+    typer.echo(f"\n  {'─' * 58}")
+    typer.echo(f"  {_b(task_id)}  {_d(task['owner'])}")
+    typer.echo(f"  {task['title']}")
+    if task.get("acceptance"):
+        for criterion in task["acceptance"]:
+            typer.echo(f"  {_d('•')} {criterion}")
+
+    if status == "completed":
+        typer.echo(f"\n  Validating {task_id}...")
+        with _client() as c:
+            resp = c.post(
+                f"/tasks/{task_id}/validate", json={"repo_path": repo, "actor": "validator"}
+            )
+        if resp.is_error:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            typer.echo(f"  {_r('Validation error')}: {detail}", err=True)
+            return
+        body = resp.json()
+        v = body.get("validation", {})
+        typer.echo("")
+        _show_validation(v)
+        if not v.get("passed", False):
+            typer.echo(
+                f"\n  {_r('Validation failed.')} The dispatcher will retry if budget allows."
+            )
+            return
+        # Now it's validated; fall through to approval prompt below.
+        task = body["task"]
+        status = task["status"]
+
+    if status == "validated":
+        typer.echo(f"\n  Status: {_g('validated')}  Awaiting your approval.")
+        choice = (
+            typer.prompt(
+                f"\n  {_b('[a]')}pprove + merge   {_b('[s]')}kip",
+                default="a",
+            )
+            .strip()
+            .lower()
+        )
+        if choice.startswith("a"):
+            _do_merge(task, repo, gw)
+        else:
+            typer.echo("  Skipped — task stays validated.")
+
+    elif status == "failed":
+        typer.echo(f"\n  {_r('Failed.')} The dispatcher will retry or escalate.")
+
+    elif status == "escalated":
+        typer.echo(f"\n  {_r('Escalated.')} Retry budget exhausted — manual intervention needed.")
+
+
+@app.command("review")
+def review(
+    repo: str = typer.Option(..., "--repo", "-r", help="Managed repo path."),
+    gateway_url: str = typer.Option(None, "--gateway-url", help="Gateway base URL."),
+    poll: int = typer.Option(5, "--poll", help="Seconds between polls for completed tasks."),
+) -> None:
+    """Interactive approval loop: auto-validate completed tasks and prompt for merge.
+
+    \b
+    Polls the orchestrator for tasks in 'completed' or 'validated' state.
+    For each completed task: runs validation (ruff + pytest) automatically.
+    Then prompts for human approval (merge to main) or skip.
+    Exits when all tasks are closed/failed/escalated, or on Ctrl+C.
+    """
+    gw = gateway_url or os.getenv("GATEWAY_URL", "http://localhost:8081")
+    seen: set[str] = set()
+
+    typer.echo(f"\n  {_b('Orchestra Review Loop')}  {_d('Ctrl+C to exit')}")
+    typer.echo(f"  {_d('repo:')} {repo}  {_d('poll:')} {poll}s\n")
+
+    _TERMINAL = {"closed", "failed", "escalated", "cancelled"}
+    _PENDING = {"completed", "validated"}
+
+    try:
+        while True:
+            with _client() as c:
+                resp = c.get("/tasks")
+            _handle_error(resp)
+            tasks = resp.json()
+
+            if not tasks:
+                typer.echo("  No tasks found.")
+                break
+
+            pending = [t for t in tasks if t["status"] in _PENDING]
+            running = [t for t in tasks if t["status"] == "running"]
+            done = all(t["status"] in _TERMINAL for t in tasks)
+
+            # Present each pending task once (or re-present if it moved to validated).
+            new_tasks = [t for t in pending if f"{t['id']}:{t['status']}" not in seen]
+
+            if new_tasks:
+                for task in new_tasks:
+                    seen.add(f"{task['id']}:{task['status']}")
+                    _handle_task(task, repo, gw)
+            elif done:
+                typer.echo(f"\n  {_g('All tasks finished.')} Review complete.")
+                break
+            else:
+                n_running = len(running)
+                n_done = sum(1 for t in tasks if t["status"] in _TERMINAL)
+                typer.echo(
+                    f"\r  {_d(f'running:{n_running}  done:{n_done}/{len(tasks)}  waiting...')}   ",
+                    nl=False,
+                )
+                time.sleep(poll)
+
+    except KeyboardInterrupt:
+        typer.echo("\n\n  Exiting review loop.")
 
 
 # ---------------------------------------------------------------------------

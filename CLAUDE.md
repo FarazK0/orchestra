@@ -115,6 +115,7 @@ All canonical commands live in the Makefile. Current targets:
 - `run-task TASK-ID --repo PATH` — assemble context package and start run (assigned→running)
 - `validate TASK-ID --repo PATH` — run validator (ruff + pytest) on agent branch (completed→validated/failed)
 - `merge TASK-ID --repo PATH` — merge agent branch into main via gateway, close task (validated→merged→closed)
+- `review --repo PATH` — interactive approval loop: auto-validates completed tasks, shows ruff/pytest results, prompts for merge
 
 Gateway service (port 8081) — start with `uvicorn gateway.gateway.app:app --port 8081`:
 - `POST /read_artifact` — read a file from the managed repo (audited)

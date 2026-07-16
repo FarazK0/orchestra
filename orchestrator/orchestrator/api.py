@@ -122,6 +122,11 @@ class ValidateRequest(BaseModel):
     actor: str = "validator"
 
 
+class ValidateResponse(BaseModel):
+    task: TaskSchema
+    validation: dict[str, Any]
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -267,19 +272,19 @@ def start_run(
     return RunRecordSchema.model_validate(run)
 
 
-@app.post("/tasks/{task_id}/validate", response_model=TaskSchema)
+@app.post("/tasks/{task_id}/validate", response_model=ValidateResponse)
 def validate_task_endpoint(
     task_id: str,
     body: ValidateRequest,
     session: SessionDep,
     bg: BackgroundTasks,
-) -> TaskSchema:
+) -> ValidateResponse:
     """Run ruff + pytest on the agent branch and transition to validated/failed."""
     from .validator import ValidationError, validate_task
 
     _task_or_404(session, task_id)
     try:
-        validate_task(session, task_id, body.repo_path, actor=body.actor)
+        results = validate_task(session, task_id, body.repo_path, actor=body.actor)
     except ValidationError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     # validate_task() calls transition() internally; fetch the event it emitted.
@@ -298,4 +303,7 @@ def validate_task_endpoint(
             task_id,
             latest_event.payload,
         )
-    return TaskSchema.model_validate(session.get(TaskORM, task_id))
+    return ValidateResponse(
+        task=TaskSchema.model_validate(session.get(TaskORM, task_id)),
+        validation=results,
+    )
