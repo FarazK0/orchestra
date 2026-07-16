@@ -1,4 +1,4 @@
-.PHONY: up down migrate clean-db test lint demo demo-v2 dispatcher
+.PHONY: up down migrate clean-db test lint demo demo-v2 dispatcher setup stop logs
 
 up:
 	docker compose up -d
@@ -27,3 +27,16 @@ demo-v2:
 dispatcher:
 	SANDBOX_REPO_PATH=$(SANDBOX_REPO_PATH) RUN_STORE_DIR=$(RUN_STORE_DIR) \
 	uv run python -m orchestrator.orchestrator.dispatcher
+
+setup:
+	bash scripts/setup.sh
+
+stop:
+	@for p in /tmp/orchestra/pids/*.pid; do \
+		[ -f "$$p" ] || continue; \
+		kill "$$(cat $$p)" 2>/dev/null && echo "stopped $$(basename $$p .pid)" || true; \
+		rm -f "$$p"; \
+	done
+
+logs:
+	tail -f /tmp/orchestra/logs/*.log
