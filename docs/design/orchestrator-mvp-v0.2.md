@@ -242,6 +242,14 @@ Exit criteria: one task flows end to end; killing any component mid-run leaves r
 **Week 11:** Policy file for risk tiers, Tier 2 hard gates, batch review queue as the first web UI (Next.js or plain HTMX; the review queue matters more than aesthetics).
 **Week 12:** Observability pass: OTel traces per run, Prometheus metrics, Grafana dashboard (tasks by state, cost per task, validator pass rate, human queue latency). Demo: the refused out-of-scope write, shown in the audit log and the trace.
 
+**Phase 3 implementation notes (actual vs. design):**
+
+Steps shipped ahead of the Week 9-12 plan:
+- **Step 23 (persistent root agent):** `orchctl request` submits change requests to a Redis stream; the root agent daemon decomposes them into tasks via the planner and auto-assigns root tasks. Also added `orchctl cancel` and the `cancelled` terminal state to handle stale tasks.
+- **Step 24 (agent memory system):** Resolved the design-doc open question (line 262: "configuration, not memory, until Phase 4") in favour of memory at Phase 3. Implemented three-layer persistent memory in `agent_memories` Postgres table (identity/episode/skill), injected into every context package. The v2 pass added top-K recency retrieval (bounded context), a shared project pool (`agent_id="shared"`), runtime keyword search via `POST /gateway/memory/search`, and skill deduplication. 216 tests passing.
+
+Capability tokens, provenance metadata, policy file, and observability remain next in queue.
+
 ### Phase 4: Scale and polish (Weeks 13 to 16)
 
 **Week 13:** Project/DAG visualization UI; event replay CLI (`orchctl replay --until <event_id>`) used to build a regression suite for the orchestrator itself.

@@ -58,6 +58,23 @@ it reads the package file and acts on its contents.
       "GET /health returns 200 with {\"status\": \"ok\"}",
       "pytest passes"
     ]
+  },
+
+  "agent_memory": {
+    "identity": "## Role\nYou are the backend specialist...\n\n## Project context\n...",
+    "episodes": [
+      "## TASK-001: Add /health endpoint\nAgent: backend-agent\nFiles written: app/main.py\nCommit: abc1234",
+      "..."
+    ],
+    "skills": [
+      "Always use the db_session FastAPI dependency for DB access.",
+      "..."
+    ],
+    "shared_skills": [
+      "All agents: run ruff check and pytest before calling task_complete.",
+      "..."
+    ],
+    "_warning": "Showing 10 of 23 episodes (use search_memory tool to query the archive)."
   }
 }
 ```
@@ -123,6 +140,27 @@ part of this run's context. This is intentional:
 - The run is reproducible: re-reading `context_package_ref` reconstructs the
   exact information the agent had.
 - In Phase 3, the gateway will enforce this list as the signed read capability.
+
+---
+
+---
+
+## Agent memory section
+
+The `agent_memory` key is injected by the context packager when any memories exist for the running agent. It is absent on cold-start runs (no rows yet).
+
+**Four sub-keys:**
+
+| Key | Type | Written by | Content |
+|---|---|---|---|
+| `identity` | string or null | Root agent (platform write) | Role description + project context. Refreshed after 10+ completed tasks. |
+| `episodes` | list of strings | Dispatcher (platform write, post-completion) | Template summary of each past task: files written/read, commands, commit SHA. Capped at 10 most-recently-used. |
+| `skills` | list of strings | Specialist agents (via `write_memory` tool or gateway) | Durable project conventions the agent discovered mid-task. Capped at 15 most-recently-used. Same-topic skills are deduplicated on write. |
+| `shared_skills` | list of strings | Root agent (platform write) | Project-wide conventions visible to all agent types (`agent_id="shared"`). Capped at 10 most-recently-used. |
+
+**`_warning` key** is added when combined memory exceeds 5000 chars, or when any type's archive is larger than the injected cap (prompts agent to use `search_memory`).
+
+**Runtime search:** agents can call `POST /gateway/memory/search` (Python loop: `search_memory` tool; Claude Code: curl snippet in prompt) to keyword-search the full archive during a task, including rows not pre-loaded in the context package.
 
 ---
 

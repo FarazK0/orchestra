@@ -33,8 +33,10 @@ All nine Phase 2 steps shipped, plus three significant unplanned additions:
 - **`orchctl cancel` + cancel transitions** -- stale tasks whose branches were deleted blocked the review loop indefinitely; added `cancelled` as a valid destination from every non-terminal state (`running`, `completed`, `validated`, `failed`, `escalated`, `created`, `assigned`); `orchctl cancel TASK-ID` lets the human close them; the review loop detects branch-gone merge errors and offers cancel/skip inline
 - **Snake game end-to-end demo** -- `orchctl request "implement infinite-world snake game"` produced TASK-015 which claude-code-agent completed, validated, and merged cleanly into `sandbox/sample-project/app/index.html`; first real proof that the full request-to-merge pipeline works without any manual task creation
 - **Sandbox reset** -- old diary app branches and stub files cleared; sandbox now carries only the snake game so each new demo starts from a known state
+- **Agent memory system** (Step 24) -- three-layer persistent memory in `agent_memories` Postgres table (migration 004): `identity` seeded by root agent per agent type, `episode` written by dispatcher after each task completion (template summary of AuditRows), `skill` written by agents mid-task via `POST /gateway/memory/upsert`; injected into every context package; `orchctl memory list/show/delete` as human safety valve; gateway enforces type guard (agents => skill only) and derives `agent_id` from `tasks.owner` (anti-spoofing)
+- **Agent memory v2** (post Step 24) -- four improvements from a Hermes/Graphiti comparison: (1) top-K per-type retrieval capped at `_MEMORY_LIMITS` (episode=10, skill=15, convention=10) ordered by `last_used_at DESC` to prevent context explosion at scale; (2) shared project pool (`agent_id="shared"`, `memory_type="convention"`) seeded by root agent, visible to all agent types as `shared_skills`; (3) `POST /gateway/memory/search` for runtime keyword search mid-task (ILIKE, no vector DB), exposed as `search_memory` tool for Python loop agents and curl snippet for Claude Code; (4) `last_used_at` column (migration 005) + skill deduplication on write (same-topic rows merged instead of accumulating per task)
 
-**Test count:** 197 passing tests.
+**Test count:** 216 passing tests.
 
 ---
 
@@ -107,7 +109,8 @@ The design doc's Phase 2 steps 16-19 described DAG + concurrency guard + multi-a
 ## Phase 3 priorities (in order)
 
 1. ~~**Persistent root agent**~~ -- **done** (Step 23); `orchctl request` + `agents/root/main.py` running in `setup.sh`
-2. **Capability tokens** -- PASETO/JWT minted at assignment, verified by gateway, scoped to task; replaces the informal `(agent_id, task_id)` allowlist
-3. **Provenance metadata** -- artifact writes carry `provenance` through the full pipeline; external-provenance content wrapped in delimiters before entering prompts
-4. **Per-write audit for claude-code-agent** -- gateway intercept or post-commit diff audit
-5. **Policy file for risk tiers** -- Tier 1/2 gates, configurable per project
+2. ~~**Agent memory system**~~ -- **done** (Step 24 + v2); three-layer memory (identity/episode/skill) + shared pool + top-K retrieval + runtime search + skill dedup; 216 tests
+3. **Capability tokens** -- PASETO/JWT minted at assignment, verified by gateway, scoped to task; replaces the informal `(agent_id, task_id)` allowlist
+4. **Provenance metadata** -- artifact writes carry `provenance` through the full pipeline; external-provenance content wrapped in delimiters before entering prompts
+5. **Per-write audit for claude-code-agent** -- gateway intercept or post-commit diff audit
+6. **Policy file for risk tiers** -- Tier 1/2 gates, configurable per project
