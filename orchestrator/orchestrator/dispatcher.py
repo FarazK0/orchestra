@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session
 
 from .context_packager import create_run
 from .dag import get_ready_successors, get_running_conflicts
-from .db import Run, Task, get_engine, get_session_factory
+from .db import AuditRow, Run, Task, get_engine, get_session_factory
 from .state_machine import transition
 from .streams import STREAM_KEY, StreamConsumer, StreamPublisher
 
@@ -204,8 +204,63 @@ class Dispatcher:
         )
         log.info("Auto-merged Tier 0 task %s (branch %s)", task_id, branch)
 
+    def _write_episode_memory(self, task_id: str, session: Session) -> None:
+        """Summarise the completed task's audit trail and persist as episode memory."""
+        task = session.get(Task, task_id)
+        if task is None:
+            return
+        audit_rows = session.query(AuditRow).filter(AuditRow.task_id == task_id).all()
+
+        # Build a structured (template-based) summary — no LLM required.
+        files_written = [
+            r.details.get("path", "?") for r in audit_rows if r.action == "gateway:write_artifact"
+        ]
+        files_read = [
+            r.details.get("path", "?") for r in audit_rows if r.action == "gateway:read_artifact"
+        ]
+        commands_run = [
+            " ".join(r.details.get("command", []))
+            for r in audit_rows
+            if r.action == "gateway:run_command"
+        ]
+        commit_sha = next(
+            (r.details.get("sha", "") for r in audit_rows if r.action == "gateway:git_commit"),
+            "",
+        )
+
+        lines = [f"## {task_id}: {task.title}", f"Agent: {task.owner}"]
+        if files_written:
+            lines.append(f"Files written: {', '.join(files_written)}")
+        if files_read:
+            lines.append(f"Files read: {', '.join(files_read)}")
+        if commands_run:
+            lines.append(f"Commands run: {'; '.join(commands_run)}")
+        if commit_sha:
+            lines.append(f"Commit: {commit_sha}")
+
+        content = "\n".join(lines)[:2000]
+        try:
+            resp = httpx.post(
+                f"{self._gateway_url}/memory/upsert",
+                json={
+                    "task_id": task_id,
+                    "agent_id": task.owner,
+                    "project_id": "default",
+                    "memory_type": "episode",
+                    "key": f"episode/{task_id}",
+                    "content": content,
+                },
+                headers={"X-Platform-Actor": "dispatcher"},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            log.info("Episode memory written for task %s (agent %s)", task_id, task.owner)
+        except Exception as exc:
+            log.warning("Failed to write episode memory for %s: %s", task_id, exc)
+
     def _on_task_completed(self, task_id: str, session: Session) -> None:
-        """Advance any DAG successors that are now fully unblocked."""
+        """Write episode memory, then advance any DAG successors that are now fully unblocked."""
+        self._write_episode_memory(task_id, session)
         successors = get_ready_successors(task_id, session)
         for succ in successors:
             event = transition(session, succ.id, "assigned", actor="dispatcher")

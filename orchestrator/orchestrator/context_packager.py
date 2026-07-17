@@ -17,13 +17,19 @@ Callers own the transaction; this module never commits.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .db import Run, Task
+from .db import AgentMemory, Run, Task
+
+log = logging.getLogger(__name__)
+
+_MEMORY_WARN_EVERY = 5_000  # chars; warn at every multiple of this
 
 
 class TaskNotFoundError(Exception):
@@ -74,9 +80,39 @@ def build_context_package(
             if content is not None:
                 adrs.append({"path": str(adr_file.relative_to(repo_path)), "content": content})
 
+    # Agent memory: identity, past episodes, acquired skills
+    memories = (
+        session.execute(
+            select(AgentMemory)
+            .where(AgentMemory.agent_id == task.owner, AgentMemory.project_id == "default")
+            .order_by(AgentMemory.updated_at)
+        )
+        .scalars()
+        .all()
+    )
+    agent_memory: dict | None = None
+    if memories:
+        identity = next((m.content for m in memories if m.memory_type == "identity"), None)
+        episodes = [m.content for m in memories if m.memory_type == "episode"]
+        skills = [m.content for m in memories if m.memory_type == "skill"]
+        am: dict = {"identity": identity, "episodes": episodes, "skills": skills}
+
+        total_chars = sum(len(c) for c in [identity or "", *episodes, *skills])
+        warn_level = total_chars // _MEMORY_WARN_EVERY
+        if warn_level > 0:
+            warn_msg = (
+                f"Agent memory is {total_chars} chars (~{total_chars // 4} tokens). "
+                f"Consider running 'orchctl memory list --agent {task.owner}' and "
+                f"deleting stale entries to free context budget."
+            )
+            am["_warning"] = warn_msg
+            log.warning("AGENT_MEMORY_LARGE: %s", warn_msg)
+
+        agent_memory = am
+
     branch = f"agent/backend/{task_id}"
 
-    return {
+    pkg: dict = {
         "schema_version": 1,
         "task_id": task_id,
         "packaged_at": datetime.now(timezone.utc).isoformat(),
@@ -102,6 +138,9 @@ def build_context_package(
             "acceptance_criteria": task.acceptance,
         },
     }
+    if agent_memory is not None:
+        pkg["agent_memory"] = agent_memory
+    return pkg
 
 
 def create_run(

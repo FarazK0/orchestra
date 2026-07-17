@@ -26,11 +26,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Generator
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from orchestrator.orchestrator.db import AgentMemory
 from orchestrator.orchestrator.db import Event as EventORM
+from orchestrator.orchestrator.db import Task as TaskORM
 from orchestrator.orchestrator.db import get_engine, get_session_factory
 
 from .audit import write_gateway_audit
@@ -160,6 +162,24 @@ class GitMerge(BaseModel):
 class GitMergeResponse(BaseModel):
     sha: str
     merged: bool
+
+
+class MemoryUpsert(BaseModel):
+    task_id: str | None = None
+    agent_id: str | None = None  # trusted only when X-Platform-Actor header present
+    project_id: str = "default"
+    memory_type: str  # "identity" | "episode" | "skill"
+    key: str
+    content: str
+
+
+class MemoryUpsertResponse(BaseModel):
+    memory_id: str
+    agent_id: str
+
+
+# Platform actors allowed to bypass the running-task check and write any memory type.
+_PLATFORM_ACTORS: frozenset[str] = frozenset({"dispatcher", "root-agent"})
 
 
 # ---------------------------------------------------------------------------
@@ -458,3 +478,101 @@ def git_merge(body: GitMerge, session: SessionDep) -> GitMergeResponse:
     )
 
     return GitMergeResponse(sha=sha, merged=True)
+
+
+@app.post("/memory/upsert", response_model=MemoryUpsertResponse)
+def memory_upsert(
+    body: MemoryUpsert,
+    session: SessionDep,
+    x_platform_actor: str | None = Header(default=None),
+) -> MemoryUpsertResponse:
+    """Write or update an agent memory entry. Audited.
+
+    Platform actors (dispatcher, root-agent) supply X-Platform-Actor header and
+    may write any memory_type; agent_id is taken from the body (trusted).
+    Regular agent callers must supply task_id of a running task; agent_id is
+    derived from tasks.owner; only memory_type='skill' is accepted.
+    """
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    is_platform = x_platform_actor in _PLATFORM_ACTORS
+
+    if is_platform:
+        # Platform writes: agent_id must be supplied in body.
+        if not body.agent_id:
+            raise HTTPException(status_code=400, detail="agent_id required for platform writes")
+        resolved_agent_id = body.agent_id
+    else:
+        # Agent writes: derive agent_id from the running task.
+        if not body.task_id:
+            raise HTTPException(status_code=400, detail="task_id required")
+        try:
+            _run, task = check_active_run(session, body.agent_id or "", body.task_id)
+        except PermissionDeniedError:
+            # Fallback: look up task directly (agent may not have a Run yet).
+            task = session.get(TaskORM, body.task_id)
+            if task is None or task.status != "running":
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"task {body.task_id!r} is not running or not found",
+                )
+        resolved_agent_id = task.owner
+        if body.memory_type != "skill":
+            raise HTTPException(
+                status_code=403,
+                detail="Agents may only write memory_type='skill'; identity and episode are platform-only",
+            )
+
+    if len(body.content) > 2000:
+        raise HTTPException(
+            status_code=400,
+            detail=f"content exceeds 2000-char limit ({len(body.content)} chars)",
+        )
+
+    now = datetime.now(timezone.utc)
+    memory_id = _uuid.uuid4()
+
+    stmt = (
+        pg_insert(AgentMemory)
+        .values(
+            id=memory_id,
+            agent_id=resolved_agent_id,
+            project_id=body.project_id,
+            memory_type=body.memory_type,
+            key=body.key,
+            content=body.content,
+            source_task_id=body.task_id,
+            created_at=now,
+            updated_at=now,
+        )
+        .on_conflict_do_update(
+            constraint="uq_agent_memory",
+            set_={
+                "content": body.content,
+                "source_task_id": body.task_id,
+                "updated_at": now,
+            },
+        )
+        .returning(AgentMemory.id)
+    )
+
+    result = session.execute(stmt)
+    returned_id = result.scalar_one()
+
+    write_gateway_audit(
+        session,
+        actor=x_platform_actor or resolved_agent_id,
+        operation="memory_upsert",
+        task_id=body.task_id or "",
+        details={
+            "agent_id": resolved_agent_id,
+            "memory_type": body.memory_type,
+            "key": body.key,
+            "bytes": len(body.content),
+        },
+    )
+
+    return MemoryUpsertResponse(memory_id=str(returned_id), agent_id=resolved_agent_id)

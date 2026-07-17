@@ -153,12 +153,128 @@ def _decompose_with_llm(description: str, spec_content: str, snapshot: str) -> s
 
 
 # ---------------------------------------------------------------------------
+# Identity memory seeding
+# ---------------------------------------------------------------------------
+
+_ROLE_DESCRIPTIONS: dict[str, str] = {
+    "claude-code-agent": (
+        "You are the generalist engineer for this project. "
+        "You read existing code before writing, follow established patterns, and keep changes minimal. "
+        "You handle any layer (backend, frontend, tests) as needed per task."
+    ),
+    "backend-agent": (
+        "You are the backend specialist for this project. "
+        "You own API routes, DB models, and business logic. "
+        "You do not touch frontend files."
+    ),
+    "frontend-agent": (
+        "You are the frontend specialist for this project. "
+        "You own UI components, styles, and client-side logic. "
+        "You do not touch backend or database files."
+    ),
+    "qa-agent": (
+        "You are the QA specialist for this project. "
+        "You write tests, check acceptance criteria, and verify correctness. "
+        "You do not introduce new features — only validate existing ones."
+    ),
+}
+
+
+def _role_for(agent_id: str) -> str:
+    return _ROLE_DESCRIPTIONS.get(
+        agent_id, f"You are a specialist agent ({agent_id}) for this project."
+    )
+
+
+def _seed_identity(
+    agent_id: str,
+    snapshot: str,
+    description: str,
+    orch_url: str,
+    gateway_url: str,
+    sample_task_id: str,
+) -> None:
+    """Seed or refresh identity memory for *agent_id* via the gateway.
+
+    Skips if identity memory already exists and was updated after the
+    10th-most-recent completed task for that agent (not yet stale).
+    """
+    import httpx
+
+    # Check staleness: does identity exist and is it fresh?
+    try:
+        with httpx.Client(base_url=orch_url, timeout=10.0) as client:
+            resp = client.get(
+                "/agent-memories",
+                params={"agent_id": agent_id, "memory_type": "identity"},
+            )
+            existing = resp.json() if resp.status_code == 200 else []
+    except Exception as exc:
+        log.warning("Could not check identity memory for %s: %s", agent_id, exc)
+        existing = []
+
+    if existing:
+        # Count completed tasks for this agent since identity was last written.
+        updated_at = existing[0].get("updated_at", "")
+        try:
+            with httpx.Client(base_url=orch_url, timeout=10.0) as client:
+                completed = client.get("/tasks", params={"status": "closed"}).json()
+            agent_completed = [
+                t
+                for t in completed
+                if t.get("owner") == agent_id and t.get("updated_at", "") > updated_at
+            ]
+            if len(agent_completed) < 10:
+                log.debug(
+                    "Identity memory for %s is fresh (%d tasks since last seed)",
+                    agent_id,
+                    len(agent_completed),
+                )
+                return
+        except Exception as exc:
+            log.warning("Staleness check failed for %s: %s", agent_id, exc)
+            return  # Don't re-seed if we can't check
+
+    content = (
+        f"## Role\n{_role_for(agent_id)}\n\n"
+        f"## Project context\n{snapshot[:800]}\n\n"
+        f"## Most recent change request\n{description[:400]}"
+    )[:2000]
+
+    try:
+        with httpx.Client(base_url=gateway_url, timeout=10.0) as client:
+            resp = client.post(
+                "/memory/upsert",
+                json={
+                    "task_id": sample_task_id,
+                    "agent_id": agent_id,
+                    "project_id": "default",
+                    "memory_type": "identity",
+                    "key": "identity",
+                    "content": content,
+                },
+                headers={"X-Platform-Actor": "root-agent"},
+            )
+            resp.raise_for_status()
+        log.info("Seeded identity memory for %s", agent_id)
+    except Exception as exc:
+        log.warning("Failed to seed identity memory for %s: %s", agent_id, exc)
+
+
+# ---------------------------------------------------------------------------
 # Task submission
 # ---------------------------------------------------------------------------
 
 
-def _submit_tasks(plan: list[dict], orch_url: str, change_id: str) -> list[str]:
-    """Create tasks and approve roots. Returns list of created task IDs."""
+def _submit_tasks(
+    plan: list[dict],
+    orch_url: str,
+    change_id: str,
+    gateway_url: str = "http://localhost:8081",
+    snapshot: str = "",
+    description: str = "",
+) -> list[str]:
+    """Create tasks, seed identity memory for each agent type, approve roots."""
     ordered = topo_sort(plan)
     title_to_id: dict[str, str] = {}
 
@@ -198,7 +314,18 @@ def _submit_tasks(plan: list[dict], orch_url: str, change_id: str) -> list[str]:
             resp.raise_for_status()
             log.info("Approved %s -> assigned", task_id)
 
-    return list(title_to_id.values())
+    # Seed identity memory for each unique agent type in the plan.
+    seen_agents: set[str] = set()
+    task_ids = list(title_to_id.values())
+    for task_def in ordered:
+        agent_id = task_def["owner"]
+        if agent_id in seen_agents:
+            continue
+        seen_agents.add(agent_id)
+        sample_task_id = title_to_id[task_def["title"]]
+        _seed_identity(agent_id, snapshot, description, orch_url, gateway_url, sample_task_id)
+
+    return task_ids
 
 
 # ---------------------------------------------------------------------------
@@ -213,9 +340,11 @@ class RootAgent:
         orch_url: str,
         session_factory,
         redis_url: str | None = None,
+        gateway_url: str = "http://localhost:8081",
     ) -> None:
         self._repo = repo_path
         self._orch_url = orch_url
+        self._gateway_url = gateway_url
         self._consumer = StreamConsumer(
             consumer_group="root-agent",
             consumer_name="root-0",
@@ -295,7 +424,14 @@ class RootAgent:
         log.info("Plan for [%s]: %d tasks", change_id, len(plan))
 
         try:
-            task_ids = _submit_tasks(plan, self._orch_url, change_id)
+            task_ids = _submit_tasks(
+                plan,
+                self._orch_url,
+                change_id,
+                gateway_url=self._gateway_url,
+                snapshot=snapshot,
+                description=description,
+            )
             log.info("Dispatched %d tasks for change [%s]: %s", len(task_ids), change_id, task_ids)
         except Exception as exc:
             log.error("Task submission failed for change [%s]: %s", change_id, exc)
@@ -311,11 +447,13 @@ def main(
     repo: str = typer.Option(None, "--repo", "-r", help="Managed repo path."),
     orchestrator_url: str = typer.Option(None, "--orchestrator-url", help="Orchestrator base URL."),
     redis_url: str = typer.Option(None, "--redis-url", help="Redis URL."),
+    gateway_url: str = typer.Option(None, "--gateway-url", help="Gateway base URL."),
 ) -> None:
     """Persistent root agent — consumes change requests and dispatches sub-agents."""
     repo_path = Path(repo or os.getenv("SANDBOX_REPO_PATH", "./sandbox/sample-project")).resolve()
     orch_url = orchestrator_url or os.getenv("ORCHESTRATOR_URL", "http://localhost:8080")
     r_url = redis_url or os.getenv("REDIS_URL", "redis://localhost:6380")
+    gw_url = gateway_url or os.getenv("GATEWAY_URL", "http://localhost:8081")
     db_url = os.getenv(
         "DATABASE_URL",
         "postgresql+psycopg://orchestra:orchestra@localhost:5433/orchestra",
@@ -324,7 +462,7 @@ def main(
     engine = get_engine(db_url)
     factory = get_session_factory(engine)
 
-    agent = RootAgent(repo_path, orch_url, factory, r_url)
+    agent = RootAgent(repo_path, orch_url, factory, r_url, gateway_url=gw_url)
     try:
         agent.start()
     except KeyboardInterrupt:

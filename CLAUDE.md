@@ -45,6 +45,9 @@ Retrospective: `docs/design/phase2-retro.md`.
 
 **Phase 3 in progress.** Persistent root agent (Step 23 done): accepts change requests via
 `orchctl request`, decomposes into tasks, dispatches sub-agents.
+Agent memory system (Step 24 done): identity, episode, and skill memories persisted in
+`agent_memories` Postgres table; injected into every context package; written by root agent,
+dispatcher, and agents themselves via gateway.
 
 Phase gates and weekly breakdown are in the design doc, Part 5.
 
@@ -81,6 +84,8 @@ orchestra/
 
 - Python 3.12, FastAPI, Pydantic v2 (models generated/hand-written from `schemas/`),
   SQLAlchemy 2.x + Alembic, Postgres 16. Redis only from Phase 2.
+- Postgres tables: `tasks`, `events`, `runs`, `audit_rows`, `agent_memories`
+  (`agent_memories` stores identity/episode/skill memories per `(agent_id, project_id, key)`).
 - Package management: `uv`. Lint/format: `ruff` (line length 100). Tests: `pytest`.
 - Typing is mandatory on public functions. `ruff check` and `pytest` must pass before
   any commit is considered done.
@@ -121,6 +126,9 @@ All canonical commands live in the Makefile. Current targets:
 - `validate TASK-ID --repo PATH` — run validator (ruff + pytest) on agent branch (completed→validated/failed)
 - `merge TASK-ID --repo PATH` — merge agent branch into main via gateway, close task (validated→merged→closed)
 - `review --repo PATH` — interactive approval loop: auto-validates completed tasks, shows ruff/pytest results, prompts for merge
+- `memory list [--agent AGENT_ID] [--type TYPE] [--project PROJECT]` — list agent memory rows (human safety valve)
+- `memory show MEMORY_ID [--agent AGENT_ID]` — show full content of one memory row (accepts 8-char UUID prefix)
+- `memory delete MEMORY_ID [--agent AGENT_ID] [--reason TEXT] [--yes]` — delete a memory row and write an audit record
 
 Gateway service (port 8081) — start with `uvicorn gateway.gateway.app:app --port 8081`:
 - `POST /read_artifact` — read a file from the managed repo (audited)
@@ -130,6 +138,7 @@ Gateway service (port 8081) — start with `uvicorn gateway.gateway.app:app --po
 - `POST /git/branch` — create or checkout a branch (audited)
 - `POST /git/commit` — stage paths and commit (audited)
 - `POST /git/merge` — merge agent branch into target branch (requires validated status, audited)
+- `POST /memory/upsert` — upsert an agent memory row (audited); agents may only write `memory_type="skill"`; platform writes (dispatcher, root-agent) use `X-Platform-Actor` header; content cap 2000 chars
 
 **Agent workers — two modes:**
 

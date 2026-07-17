@@ -1,11 +1,12 @@
 """SQLAlchemy ORM models for the Orchestra control plane.
 
-Five tables:
+Six tables:
   tasks            - mutable task state (status is the only frequently-written column)
   events           - append-only event log (never UPDATE or DELETE)
   runs             - one row per agent run attempt
   audit            - one row per auditable action, joined to the triggering event
   stream_deliveries - dedup table for Redis Streams exactly-once processing
+  agent_memories   - persistent memory for specialist agents (identity, episodes, skills)
 """
 
 from __future__ import annotations
@@ -120,6 +121,35 @@ class StreamDelivery(Base):
     __table_args__ = (
         UniqueConstraint("stream_key", "message_id", "consumer_group", name="uq_stream_delivery"),
     )
+
+
+class AgentMemory(Base):
+    """Persistent memory for specialist agents.
+
+    Three memory types:
+      identity  - role + project context, seeded by root agent (key = "identity")
+      episode   - per-task summary written by dispatcher after completion
+                  (key = "episode/{task_id}")
+      skill     - durable project convention written by the agent mid-task
+                  (key = "skill/{topic}/{task_id}")
+
+    The unique constraint on (agent_id, project_id, key) allows safe upserts.
+    """
+
+    __tablename__ = "agent_memories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agent_id: Mapped[str] = mapped_column(String, nullable=False)
+    project_id: Mapped[str] = mapped_column(String, nullable=False, default="default")
+    memory_type: Mapped[str] = mapped_column(String, nullable=False)
+    key: Mapped[str] = mapped_column(String, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    source_task_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (UniqueConstraint("agent_id", "project_id", "key", name="uq_agent_memory"),)
 
 
 def get_engine(url: str | None = None):

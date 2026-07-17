@@ -25,6 +25,7 @@ _EVENT_TYPES: dict[str, str] = {
     "git_branch": "GATEWAY_GIT_BRANCH",
     "git_commit": "GATEWAY_GIT_COMMIT",
     "git_merge": "GATEWAY_GIT_MERGE",
+    "memory_upsert": "GATEWAY_MEMORY_UPSERT",
 }
 
 

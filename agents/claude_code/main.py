@@ -49,6 +49,35 @@ def _build_instruction(pkg: dict, repo_path: str) -> str:
         if art.get("found") and art.get("content"):
             artifact_section += f"\n### {art['path']}\n\n```\n{art['content']}\n```\n"
 
+    # Format agent memory section if present.
+    memory_section = ""
+    mem = pkg.get("agent_memory")
+    if mem:
+        parts = ["\n## Your memory (read this before starting)\n"]
+        if mem.get("_warning"):
+            parts.append(f"> WARNING: {mem['_warning']}\n")
+        if mem.get("identity"):
+            parts.append(f"### Identity\n{mem['identity']}\n")
+        if mem.get("episodes"):
+            parts.append("### Past episodes")
+            for ep in mem["episodes"]:
+                parts.append(ep)
+            parts.append("")
+        if mem.get("skills"):
+            parts.append("### Acquired skills")
+            for sk in mem["skills"]:
+                parts.append(sk)
+            parts.append("")
+        parts.append(
+            "If you discover a reusable project convention (not task-specific detail), "
+            "record it:\n"
+            "  curl -s -X POST http://localhost:8081/memory/upsert \\\n"
+            "    -H 'Content-Type: application/json' \\\n"
+            f'    -d \'{{"task_id":"{task["id"]}","project_id":"default",'
+            '"memory_type":"skill","topic":"<slug>","content":"<under 200 words, no file dumps>"}\''
+        )
+        memory_section = "\n".join(parts)
+
     return f"""\
 You are working on a software development task in the Git repository at {repo_path}.
 Your work will be committed to branch `{branch}` (already checked out for you).
@@ -68,7 +97,8 @@ Your work will be committed to branch `{branch}` (already checked out for you).
 ## Input files
 
 {inputs_list}
-{artifact_section}
+{artifact_section}{memory_section}
+
 ## Rules
 
 - Work only within {repo_path}. Do not create files outside it.

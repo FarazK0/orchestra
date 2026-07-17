@@ -106,6 +106,30 @@ GATEWAY_TOOLS: list[dict[str, Any]] = [
             "required": ["commit_message", "paths_changed"],
         },
     },
+    {
+        "name": "write_memory",
+        "description": (
+            "Persist a reusable skill or project convention you discovered during this task. "
+            "Use ONLY for durable knowledge useful to future runs of the same agent type: "
+            "project patterns, non-obvious constraints, established conventions. "
+            "NOT for task-specific details (those go in the commit message) or file contents. "
+            "Keep content under 200 words."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": "Short slug identifying the skill, e.g. 'db-session-pattern'.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The skill or convention to remember (under 200 words).",
+                },
+            },
+            "required": ["topic", "content"],
+        },
+    },
 ]
 
 
@@ -149,6 +173,22 @@ def format_context_package(pkg: dict) -> str:
                 "",
             ]
 
+    mem = pkg.get("agent_memory")
+    if mem:
+        lines.append("### Your Memory")
+        if mem.get("_warning"):
+            lines += [f"> WARNING: {mem['_warning']}", ""]
+        if mem.get("identity"):
+            lines += ["#### Identity", mem["identity"], ""]
+        if mem.get("episodes"):
+            lines.append("#### Past episodes")
+            for ep in mem["episodes"]:
+                lines += [ep, ""]
+        if mem.get("skills"):
+            lines.append("#### Acquired skills")
+            for sk in mem["skills"]:
+                lines += [sk, ""]
+
     instr = pkg["agent_instructions"]
     lines += [
         "### Your Instructions",
@@ -158,7 +198,8 @@ def format_context_package(pkg: dict) -> str:
         "",
         (
             "Use the provided tools for every file read/write/command. "
-            "Call `task_complete` only after verifying each acceptance criterion above."
+            "Call `task_complete` only after verifying each acceptance criterion above. "
+            "Use `write_memory` to record any reusable project conventions you discover."
         ),
     ]
     return "\n".join(lines)
@@ -238,6 +279,22 @@ def _execute_gateway_tool(
             },
         )
         return f"Event emitted: {tool_input['event_type']}"
+
+    if name == "write_memory":
+        topic = tool_input["topic"]
+        _call_gateway(
+            http,
+            gateway_url,
+            "/memory/upsert",
+            {
+                "task_id": task_id,
+                "project_id": "default",
+                "memory_type": "skill",
+                "key": f"skill/{topic}/{task_id}",
+                "content": tool_input["content"],
+            },
+        )
+        return f"Skill memory written: {topic}"
 
     return f"Unknown tool: {name}"
 

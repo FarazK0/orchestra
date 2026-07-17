@@ -30,6 +30,7 @@ from schemas.models import RunRecord as RunRecordSchema
 from schemas.models import Task as TaskSchema
 from schemas.models import TaskBudget
 
+from .db import AgentMemory as AgentMemoryORM
 from .db import Event as EventORM
 from .db import Task as TaskORM
 from .db import get_engine, get_session_factory
@@ -125,6 +126,36 @@ class ValidateRequest(BaseModel):
 class ValidateResponse(BaseModel):
     task: TaskSchema
     validation: dict[str, Any]
+
+
+class AgentMemorySchema(BaseModel):
+    id: str
+    agent_id: str
+    project_id: str
+    memory_type: str
+    key: str
+    content: str
+    source_task_id: str | None
+    created_at: str
+    updated_at: str
+
+    @classmethod
+    def from_orm(cls, m: Any) -> "AgentMemorySchema":
+        return cls(
+            id=str(m.id),
+            agent_id=m.agent_id,
+            project_id=m.project_id,
+            memory_type=m.memory_type,
+            key=m.key,
+            content=m.content,
+            source_task_id=m.source_task_id,
+            created_at=m.created_at.isoformat(),
+            updated_at=m.updated_at.isoformat(),
+        )
+
+
+class MemoryDeleteRequest(BaseModel):
+    reason: str = "human deleted"
 
 
 # ---------------------------------------------------------------------------
@@ -306,4 +337,79 @@ def validate_task_endpoint(
     return ValidateResponse(
         task=TaskSchema.model_validate(session.get(TaskORM, task_id)),
         validation=results,
+    )
+
+
+@app.get("/agent-memories", response_model=list[AgentMemorySchema])
+def list_agent_memories(
+    session: SessionDep,
+    agent_id: str | None = Query(default=None),
+    memory_type: str | None = Query(default=None),
+    project_id: str = Query(default="default"),
+) -> list[AgentMemorySchema]:
+    """List agent memory entries, optionally filtered by agent_id and memory_type."""
+    q = select(AgentMemoryORM).where(AgentMemoryORM.project_id == project_id)
+    if agent_id:
+        q = q.where(AgentMemoryORM.agent_id == agent_id)
+    if memory_type:
+        q = q.where(AgentMemoryORM.memory_type == memory_type)
+    q = q.order_by(AgentMemoryORM.updated_at)
+    rows = session.execute(q).scalars().all()
+    return [AgentMemorySchema.from_orm(m) for m in rows]
+
+
+@app.delete("/agent-memories/{memory_id}", status_code=204)
+def delete_agent_memory(
+    memory_id: str,
+    body: MemoryDeleteRequest,
+    session: SessionDep,
+    bg: BackgroundTasks,
+) -> None:
+    """Delete a memory entry. Writes an audit event before deletion."""
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    mem = session.get(AgentMemoryORM, _uuid.UUID(memory_id))
+    if mem is None:
+        raise HTTPException(status_code=404, detail=f"Memory {memory_id!r} not found")
+
+    now = datetime.now(timezone.utc)
+    event = EventORM(
+        event_id=_uuid.uuid4(),
+        schema_version=1,
+        event_type="AGENT_MEMORY_DELETED",
+        task_id=mem.source_task_id,
+        emitted_by="human",
+        emitted_at=now,
+        payload={
+            "memory_id": memory_id,
+            "agent_id": mem.agent_id,
+            "memory_type": mem.memory_type,
+            "key": mem.key,
+            "reason": body.reason,
+        },
+    )
+    session.add(event)
+    session.flush()
+
+    from .db import AuditRow
+
+    audit = AuditRow(
+        id=_uuid.uuid4(),
+        timestamp=now,
+        actor="human",
+        action="memory_delete",
+        task_id=mem.source_task_id,
+        event_id=event.event_id,
+        details={"memory_id": memory_id, "agent_id": mem.agent_id, "reason": body.reason},
+    )
+    session.add(audit)
+    session.delete(mem)
+
+    bg.add_task(
+        _try_publish,
+        str(event.event_id),
+        "AGENT_MEMORY_DELETED",
+        mem.source_task_id or "",
+        event.payload,
     )

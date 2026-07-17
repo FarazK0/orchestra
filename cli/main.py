@@ -678,6 +678,126 @@ def review(
 
 
 # ---------------------------------------------------------------------------
+# Memory management
+# ---------------------------------------------------------------------------
+
+memory_app = typer.Typer(
+    name="memory", help="Manage persistent agent memories.", no_args_is_help=True
+)
+app.add_typer(memory_app, name="memory")
+
+
+@memory_app.command("list")
+def memory_list(
+    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Filter by agent_id."),
+    type_: Optional[str] = typer.Option(None, "--type", "-t", help="Filter by memory_type."),
+    project: str = typer.Option("default", "--project", help="Project ID."),
+) -> None:
+    """List agent memory entries."""
+    params: dict = {"project_id": project}
+    if agent:
+        params["agent_id"] = agent
+    if type_:
+        params["memory_type"] = type_
+
+    with _client() as c:
+        resp = c.get("/agent-memories", params=params)
+    _handle_error(resp)
+    rows = resp.json()
+
+    if not rows:
+        typer.echo("  No memory entries found.")
+        return
+
+    typer.echo(f"\n  {'ID'[:8]:<10} {'AGENT':<22} {'TYPE':<10} {'KEY':<35} UPDATED")
+    typer.echo(f"  {'-' * 8:<10} {'-' * 22:<22} {'-' * 8:<10} {'-' * 35:<35} -------")
+    for m in rows:
+        typer.echo(
+            f"  {m['id'][:8]:<10} {m['agent_id'][:22]:<22} {m['memory_type'][:10]:<10} "
+            f"{m['key'][:35]:<35} {m['updated_at'][:19]}"
+        )
+    typer.echo(f"\n  {len(rows)} entr{'y' if len(rows) == 1 else 'ies'}")
+
+
+@memory_app.command("show")
+def memory_show(
+    memory_id: str = typer.Argument(..., help="Full memory ID (UUID) or 8-char prefix."),
+    agent: Optional[str] = typer.Option(
+        None, "--agent", "-a", help="Agent ID (to resolve prefix)."
+    ),
+    project: str = typer.Option("default", "--project", help="Project ID."),
+) -> None:
+    """Show the full content of a memory entry."""
+    params: dict = {"project_id": project}
+    if agent:
+        params["agent_id"] = agent
+
+    with _client() as c:
+        resp = c.get("/agent-memories", params=params)
+    _handle_error(resp)
+    rows = resp.json()
+
+    match = next(
+        (m for m in rows if m["id"] == memory_id or m["id"].startswith(memory_id)),
+        None,
+    )
+    if match is None:
+        typer.echo(f"  Memory {memory_id!r} not found.", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"\n  ID:      {match['id']}")
+    typer.echo(f"  Agent:   {match['agent_id']}")
+    typer.echo(f"  Type:    {match['memory_type']}")
+    typer.echo(f"  Key:     {match['key']}")
+    typer.echo(f"  Updated: {match['updated_at']}")
+    typer.echo(f"\n{match['content']}\n")
+
+
+@memory_app.command("delete")
+def memory_delete(
+    memory_id: str = typer.Argument(..., help="Full memory ID (UUID) or 8-char prefix."),
+    agent: Optional[str] = typer.Option(
+        None, "--agent", "-a", help="Agent ID (to resolve prefix)."
+    ),
+    reason: str = typer.Option("human deleted", "--reason", "-r", help="Reason for deletion."),
+    project: str = typer.Option("default", "--project", help="Project ID."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+) -> None:
+    """Delete a memory entry (writes an audit record before deletion)."""
+    params: dict = {"project_id": project}
+    if agent:
+        params["agent_id"] = agent
+
+    with _client() as c:
+        resp = c.get("/agent-memories", params=params)
+    _handle_error(resp)
+    rows = resp.json()
+
+    match = next(
+        (m for m in rows if m["id"] == memory_id or m["id"].startswith(memory_id)),
+        None,
+    )
+    if match is None:
+        typer.echo(f"  Memory {memory_id!r} not found.", err=True)
+        raise typer.Exit(1)
+
+    if not yes:
+        typer.echo(
+            f"\n  Will delete: [{match['memory_type']}] {match['key']} ({match['agent_id']})"
+        )
+        typer.confirm("  Confirm deletion?", abort=True)
+
+    with _client() as c:
+        resp = c.request(
+            "DELETE",
+            f"/agent-memories/{match['id']}",
+            json={"reason": reason},
+        )
+    _handle_error(resp)
+    typer.echo(f"  Deleted memory {match['id'][:8]} ({match['key']})")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
