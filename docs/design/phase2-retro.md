@@ -1,7 +1,7 @@
 # Phase 2 Retrospective
 
 **Scope completed:** Concurrency -- Redis Streams event bus, DAG scheduling, multi-agent fan-out, retry, Tier 0 auto-merge, Claude Code as agent worker, interactive review loop.
-**Date:** 2026-07-16
+**Date:** 2026-07-17 (updated)
 
 ---
 
@@ -27,7 +27,14 @@ All nine Phase 2 steps shipped, plus three significant unplanned additions:
 - **Setup script + planner agent** (`scripts/setup.sh`, `agents/planner/main.py`) -- one-command onboarding: reads a spec file, decomposes it into tasks via the planner, submits them, then drops into the review loop
 - **Interactive review loop** (`orchctl review`) -- polls for `completed`/`validated` tasks, auto-validates each, shows ruff/pytest results inline, and prompts for approve-or-skip rather than requiring the user to run three separate commands per task
 
-**Test count:** 193 passing tests.
+**Post-retro additions (emerged during Phase 3 bring-up):**
+
+- **Persistent root agent** (`agents/root/main.py`) -- daemon that consumes `root:requests` Redis stream, decomposes change requests into tasks via claude CLI or LLM, submits and auto-assigns them; `orchctl request "description"` is the entry point; shares planner utilities via `agents/planner/plan_utils.py`
+- **`orchctl cancel` + cancel transitions** -- stale tasks whose branches were deleted blocked the review loop indefinitely; added `cancelled` as a valid destination from every non-terminal state (`running`, `completed`, `validated`, `failed`, `escalated`, `created`, `assigned`); `orchctl cancel TASK-ID` lets the human close them; the review loop detects branch-gone merge errors and offers cancel/skip inline
+- **Snake game end-to-end demo** -- `orchctl request "implement infinite-world snake game"` produced TASK-015 which claude-code-agent completed, validated, and merged cleanly into `sandbox/sample-project/app/index.html`; first real proof that the full request-to-merge pipeline works without any manual task creation
+- **Sandbox reset** -- old diary app branches and stub files cleared; sandbox now carries only the snake game so each new demo starts from a known state
+
+**Test count:** 197 passing tests.
 
 ---
 
@@ -61,7 +68,15 @@ Fix: filter `ANTHROPIC_API_KEY` out of the environment before any `claude` subpr
 
 **Lesson:** Long-running silent subprocesses need at minimum a "this will take ~N seconds" message. Even a spinner would be better.
 
-### 5. Step numbering vs actual sequence
+### 5. Stale tasks block the review loop after a sandbox reset
+
+When the sandbox branches are deleted (e.g., between sessions or after a reset), tasks that were in `validated` or `completed` status remain in Postgres. The review loop picks them up, attempts `git merge`, and hits "not something we can merge" because the branch is gone. There was no way to clear them short of direct DB edits.
+
+Fix: added `cancelled` as a reachable status from every non-terminal state in the state machine, `orchctl cancel TASK-ID` for explicit human cancellation, and branch-gone error detection in `_do_merge()` that offers cancel/skip automatically.
+
+**Lesson:** The review loop needs a graceful degradation path for every recoverable error. "Fail loudly then offer a menu" is better than silently looping or requiring the human to know the DB schema.
+
+### 6. Step numbering vs actual sequence
 
 The design doc's Phase 2 steps 16-19 described DAG + concurrency guard + multi-agent + Q&A flow. What actually shipped in those step slots was frontend agent, QA agent, retry, and Tier 0 auto-merge -- a different ordering. The concurrency guard (overlapping output detection) was not built; the Q&A event flow was deferred. This is fine, but it means the step numbers in commit history do not map to design-doc step numbers.
 
@@ -91,7 +106,7 @@ The design doc's Phase 2 steps 16-19 described DAG + concurrency guard + multi-a
 
 ## Phase 3 priorities (in order)
 
-1. **Persistent root agent** -- a long-running process that accepts change requests, decomposes them via the planner, and dispatches sub-agents; makes the workflow ongoing rather than one-shot
+1. ~~**Persistent root agent**~~ -- **done** (Step 23); `orchctl request` + `agents/root/main.py` running in `setup.sh`
 2. **Capability tokens** -- PASETO/JWT minted at assignment, verified by gateway, scoped to task; replaces the informal `(agent_id, task_id)` allowlist
 3. **Provenance metadata** -- artifact writes carry `provenance` through the full pipeline; external-provenance content wrapped in delimiters before entering prompts
 4. **Per-write audit for claude-code-agent** -- gateway intercept or post-commit diff audit
