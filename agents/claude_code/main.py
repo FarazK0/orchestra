@@ -68,13 +68,22 @@ def _build_instruction(pkg: dict, repo_path: str) -> str:
             for sk in mem["skills"]:
                 parts.append(sk)
             parts.append("")
+        if mem.get("shared_skills"):
+            parts.append("### Shared project conventions (all agents)")
+            for sk in mem["shared_skills"]:
+                parts.append(sk)
+            parts.append("")
         parts.append(
             "If you discover a reusable project convention (not task-specific detail), "
             "record it:\n"
             "  curl -s -X POST http://localhost:8081/memory/upsert \\\n"
             "    -H 'Content-Type: application/json' \\\n"
             f'    -d \'{{"task_id":"{task["id"]}","project_id":"default",'
-            '"memory_type":"skill","topic":"<slug>","content":"<under 200 words, no file dumps>"}\''
+            '"memory_type":"skill","topic":"<slug>","content":"<under 200 words, no file dumps>"}\'\n\n'
+            "To search your memory archive for a keyword:\n"
+            "  curl -s -X POST http://localhost:8081/memory/search \\\n"
+            "    -H 'Content-Type: application/json' \\\n"
+            f'    -d \'{{"task_id":"{task["id"]}","query":"<keyword>","max_results":5}}\''
         )
         memory_section = "\n".join(parts)
 

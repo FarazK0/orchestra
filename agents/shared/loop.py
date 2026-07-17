@@ -130,6 +130,29 @@ GATEWAY_TOOLS: list[dict[str, Any]] = [
             "required": ["topic", "content"],
         },
     },
+    {
+        "name": "search_memory",
+        "description": (
+            "Search your memory archive by keyword during task execution. "
+            "Use this when you need to recall a convention or past episode that may not be "
+            "in the pre-loaded memory section (context only shows the most recent entries). "
+            "Returns up to 5 matching snippets from your memories and the shared project pool."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keyword or phrase to search for, e.g. 'db session pattern'.",
+                },
+                "memory_type": {
+                    "type": "string",
+                    "description": "Optional filter: 'identity', 'episode', 'skill', or 'convention'.",
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 
@@ -187,6 +210,10 @@ def format_context_package(pkg: dict) -> str:
         if mem.get("skills"):
             lines.append("#### Acquired skills")
             for sk in mem["skills"]:
+                lines += [sk, ""]
+        if mem.get("shared_skills"):
+            lines.append("#### Shared project conventions")
+            for sk in mem["shared_skills"]:
                 lines += [sk, ""]
 
     instr = pkg["agent_instructions"]
@@ -295,6 +322,19 @@ def _execute_gateway_tool(
             },
         )
         return f"Skill memory written: {topic}"
+
+    if name == "search_memory":
+        payload: dict = {"task_id": task_id, "query": tool_input["query"]}
+        if tool_input.get("memory_type"):
+            payload["memory_type"] = tool_input["memory_type"]
+        data = _call_gateway(http, gateway_url, "/memory/search", payload)
+        results = data.get("results", [])
+        if not results:
+            return "No matching memories found."
+        lines_out = [f"Found {len(results)} result(s):"]
+        for r in results:
+            lines_out.append(f"[{r['memory_type']}] {r['key']}: {r['snippet']}")
+        return "\n".join(lines_out)
 
     return f"Unknown tool: {name}"
 

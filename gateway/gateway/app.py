@@ -30,6 +30,8 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from sqlalchemy import select
+
 from orchestrator.orchestrator.db import AgentMemory
 from orchestrator.orchestrator.db import Event as EventORM
 from orchestrator.orchestrator.db import Task as TaskORM
@@ -176,6 +178,24 @@ class MemoryUpsert(BaseModel):
 class MemoryUpsertResponse(BaseModel):
     memory_id: str
     agent_id: str
+
+
+class MemorySearch(BaseModel):
+    task_id: str
+    query: str
+    memory_type: str | None = None  # filter to one type; None = all types
+    max_results: int = Field(default=5, ge=1, le=20)
+
+
+class MemorySearchResult(BaseModel):
+    key: str
+    memory_type: str
+    snippet: str  # first 300 chars of content
+    updated_at: str
+
+
+class MemorySearchResponse(BaseModel):
+    results: list[MemorySearchResult]
 
 
 # Platform actors allowed to bypass the running-task check and write any memory type.
@@ -532,6 +552,31 @@ def memory_upsert(
             detail=f"content exceeds 2000-char limit ({len(body.content)} chars)",
         )
 
+    # Skill deduplication: reuse an existing row with the same topic rather than
+    # creating a new skill/{topic}/{task_id} row every task.
+    effective_key = body.key
+    if body.memory_type == "skill" and "/" in body.key:
+        # key format: "skill/{topic}/{task_id}" — extract the topic prefix
+        parts = body.key.split("/")
+        if len(parts) >= 3:
+            topic_prefix = f"{parts[0]}/{parts[1]}/"
+            existing = (
+                session.execute(
+                    select(AgentMemory)
+                    .where(
+                        AgentMemory.agent_id == resolved_agent_id,
+                        AgentMemory.project_id == body.project_id,
+                        AgentMemory.key.like(f"{topic_prefix}%"),
+                    )
+                    .order_by(AgentMemory.updated_at.desc())
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
+            if existing:
+                effective_key = existing.key  # overwrite the existing row's key
+
     now = datetime.now(timezone.utc)
     memory_id = _uuid.uuid4()
 
@@ -542,7 +587,7 @@ def memory_upsert(
             agent_id=resolved_agent_id,
             project_id=body.project_id,
             memory_type=body.memory_type,
-            key=body.key,
+            key=effective_key,
             content=body.content,
             source_task_id=body.task_id,
             created_at=now,
@@ -576,3 +621,58 @@ def memory_upsert(
     )
 
     return MemoryUpsertResponse(memory_id=str(returned_id), agent_id=resolved_agent_id)
+
+
+@app.post("/memory/search", response_model=MemorySearchResponse)
+def memory_search(body: MemorySearch, session: SessionDep) -> MemorySearchResponse:
+    """Search agent memories by keyword during task execution. Audited.
+
+    Searches the calling agent's own memories plus the shared project pool
+    (agent_id='shared') using Postgres ILIKE. Returns up to max_results matches.
+    """
+    # Derive agent_id from the running task (same trust model as /memory/upsert).
+    try:
+        _run, task = check_active_run(session, "", body.task_id)
+    except PermissionDeniedError:
+        task = session.get(TaskORM, body.task_id)
+        if task is None or task.status != "running":
+            raise HTTPException(
+                status_code=403,
+                detail=f"task {body.task_id!r} is not running or not found",
+            )
+    agent_id = task.owner
+
+    q = (
+        select(AgentMemory)
+        .where(
+            AgentMemory.agent_id.in_([agent_id, "shared"]),
+            AgentMemory.project_id == "default",
+            AgentMemory.content.ilike(f"%{body.query}%"),
+        )
+        .order_by(AgentMemory.last_used_at.desc().nulls_last(), AgentMemory.updated_at.desc())
+        .limit(body.max_results)
+    )
+    if body.memory_type:
+        q = q.where(AgentMemory.memory_type == body.memory_type)
+
+    rows = session.execute(q).scalars().all()
+
+    write_gateway_audit(
+        session,
+        actor=agent_id,
+        operation="memory_search",
+        task_id=body.task_id,
+        details={"query": body.query, "hits": len(rows)},
+    )
+
+    return MemorySearchResponse(
+        results=[
+            MemorySearchResult(
+                key=r.key,
+                memory_type=r.memory_type,
+                snippet=r.content[:300],
+                updated_at=r.updated_at.isoformat(),
+            )
+            for r in rows
+        ]
+    )

@@ -138,7 +138,8 @@ Gateway service (port 8081) — start with `uvicorn gateway.gateway.app:app --po
 - `POST /git/branch` — create or checkout a branch (audited)
 - `POST /git/commit` — stage paths and commit (audited)
 - `POST /git/merge` — merge agent branch into target branch (requires validated status, audited)
-- `POST /memory/upsert` — upsert an agent memory row (audited); agents may only write `memory_type="skill"`; platform writes (dispatcher, root-agent) use `X-Platform-Actor` header; content cap 2000 chars
+- `POST /memory/upsert` — upsert an agent memory row (audited); agents may only write `memory_type="skill"`; platform writes (dispatcher, root-agent) use `X-Platform-Actor` header; content cap 2000 chars; skill deduplication merges same-topic rows
+- `POST /memory/search` — keyword search over agent's own memories + shared pool (`agent_id="shared"`); derives agent_id from tasks.owner; audited
 
 **Agent workers — two modes:**
 

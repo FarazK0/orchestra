@@ -22,7 +22,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .db import AgentMemory, Run, Task
@@ -30,6 +30,16 @@ from .db import AgentMemory, Run, Task
 log = logging.getLogger(__name__)
 
 _MEMORY_WARN_EVERY = 5_000  # chars; warn at every multiple of this
+
+# Maximum number of memories injected per type to prevent context explosion.
+# Rows are ranked by last_used_at DESC so the most-recently-seen entries win.
+# The full archive remains searchable via POST /memory/search during the task.
+_MEMORY_LIMITS: dict[str, int] = {
+    "identity": 1,
+    "episode": 10,
+    "skill": 15,
+    "convention": 10,  # shared project-level conventions (agent_id="shared")
+}
 
 
 class TaskNotFoundError(Exception):
@@ -80,35 +90,99 @@ def build_context_package(
             if content is not None:
                 adrs.append({"path": str(adr_file.relative_to(repo_path)), "content": content})
 
-    # Agent memory: identity, past episodes, acquired skills
-    memories = (
-        session.execute(
-            select(AgentMemory)
-            .where(AgentMemory.agent_id == task.owner, AgentMemory.project_id == "default")
-            .order_by(AgentMemory.updated_at)
-        )
-        .scalars()
-        .all()
-    )
-    agent_memory: dict | None = None
-    if memories:
-        identity = next((m.content for m in memories if m.memory_type == "identity"), None)
-        episodes = [m.content for m in memories if m.memory_type == "episode"]
-        skills = [m.content for m in memories if m.memory_type == "skill"]
-        am: dict = {"identity": identity, "episodes": episodes, "skills": skills}
-
-        total_chars = sum(len(c) for c in [identity or "", *episodes, *skills])
-        warn_level = total_chars // _MEMORY_WARN_EVERY
-        if warn_level > 0:
-            warn_msg = (
-                f"Agent memory is {total_chars} chars (~{total_chars // 4} tokens). "
-                f"Consider running 'orchctl memory list --agent {task.owner}' and "
-                f"deleting stale entries to free context budget."
+    # Agent memory: top-K per type ordered by recency, plus shared project conventions.
+    # Separate queries per type so each gets its own LIMIT without cross-type interference.
+    def _fetch_top_k(agent_ids: list[str], mem_type: str, limit: int) -> list[AgentMemory]:
+        return (
+            session.execute(
+                select(AgentMemory)
+                .where(
+                    AgentMemory.agent_id.in_(agent_ids),
+                    AgentMemory.project_id == "default",
+                    AgentMemory.memory_type == mem_type,
+                )
+                .order_by(
+                    AgentMemory.last_used_at.desc().nulls_last(), AgentMemory.updated_at.desc()
+                )
+                .limit(limit)
             )
+            .scalars()
+            .all()
+        )
+
+    own_ids = [task.owner]
+    identity_rows = _fetch_top_k(own_ids, "identity", _MEMORY_LIMITS["identity"])
+    episode_rows = _fetch_top_k(own_ids, "episode", _MEMORY_LIMITS["episode"])
+    skill_rows = _fetch_top_k(own_ids, "skill", _MEMORY_LIMITS["skill"])
+    shared_rows = _fetch_top_k(["shared"], "convention", _MEMORY_LIMITS["convention"])
+
+    all_injected = identity_rows + episode_rows + skill_rows + shared_rows
+    agent_memory: dict | None = None
+
+    if all_injected:
+        identity = identity_rows[0].content if identity_rows else None
+        episodes = [m.content for m in episode_rows]
+        skills = [m.content for m in skill_rows]
+        shared_skills = [m.content for m in shared_rows]
+        am: dict = {
+            "identity": identity,
+            "episodes": episodes,
+            "skills": skills,
+            "shared_skills": shared_skills,
+        }
+
+        # Size warning
+        total_chars = sum(len(c) for c in [identity or "", *episodes, *skills, *shared_skills])
+        warn_level = total_chars // _MEMORY_WARN_EVERY
+        warnings: list[str] = []
+        if warn_level > 0:
+            warnings.append(f"Agent memory is {total_chars} chars (~{total_chars // 4} tokens).")
+
+        # Cap-hit warnings (archive is larger than what's injected)
+        total_episode_count = (
+            session.query(AgentMemory)
+            .filter(
+                AgentMemory.agent_id == task.owner,
+                AgentMemory.project_id == "default",
+                AgentMemory.memory_type == "episode",
+            )
+            .count()
+        )
+        total_skill_count = (
+            session.query(AgentMemory)
+            .filter(
+                AgentMemory.agent_id == task.owner,
+                AgentMemory.project_id == "default",
+                AgentMemory.memory_type == "skill",
+            )
+            .count()
+        )
+
+        if total_episode_count > _MEMORY_LIMITS["episode"]:
+            warnings.append(
+                f"Showing {len(episodes)} of {total_episode_count} episodes "
+                f"(use search_memory tool to query the archive)."
+            )
+        if total_skill_count > _MEMORY_LIMITS["skill"]:
+            warnings.append(
+                f"Showing {len(skills)} of {total_skill_count} skills "
+                f"(use search_memory tool to query the archive)."
+            )
+
+        if warnings:
+            warn_msg = " ".join(warnings)
             am["_warning"] = warn_msg
-            log.warning("AGENT_MEMORY_LARGE: %s", warn_msg)
+            log.warning("AGENT_MEMORY_LARGE: agent=%s %s", task.owner, warn_msg)
 
         agent_memory = am
+
+        # Update last_used_at for all injected memories so recency ranking stays current.
+        injected_ids = [m.id for m in all_injected]
+        session.execute(
+            update(AgentMemory)
+            .where(AgentMemory.id.in_(injected_ids))
+            .values(last_used_at=datetime.now(timezone.utc))
+        )
 
     branch = f"agent/backend/{task_id}"
 

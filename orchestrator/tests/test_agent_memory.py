@@ -258,3 +258,91 @@ def test_delete_agent_memory_404(api_client):
     fake_id = str(uuid.uuid4())
     resp = api_client.request("DELETE", f"/agent-memories/{fake_id}", json={"reason": "gone"})
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Improvement 3+4: top-K cap, shared pool, last_used_at
+# ---------------------------------------------------------------------------
+
+
+def test_context_packager_top_k_cap(session, tmp_path):
+    """Context packager injects at most _MEMORY_LIMITS['episode'] episodes."""
+    from orchestrator.orchestrator.context_packager import _MEMORY_LIMITS
+
+    make_task(session, "TASK-MEM-TOPK", owner="claude-code-agent")
+    limit = _MEMORY_LIMITS["episode"]
+    for i in range(limit + 3):
+        _make_memory(
+            session,
+            agent_id="claude-code-agent",
+            memory_type="episode",
+            key=f"episode/TASK-CAP-{i:03d}",
+            content=f"Episode {i}.",
+        )
+    pkg = build_context_package(session, "TASK-MEM-TOPK", tmp_path)
+    assert len(pkg["agent_memory"]["episodes"]) == limit
+    assert "_warning" in pkg["agent_memory"]
+    assert "archive" in pkg["agent_memory"]["_warning"]
+
+
+def test_context_packager_shared_pool(session, tmp_path):
+    """Shared conventions (agent_id='shared') are injected as shared_skills."""
+    make_task(session, "TASK-MEM-SHARED", owner="backend-agent")
+    now = datetime.now(timezone.utc)
+    session.add(
+        AgentMemory(
+            id=uuid.uuid4(),
+            agent_id="shared",
+            project_id="default",
+            memory_type="convention",
+            key="shared/project-conventions",
+            content="Always run ruff before committing.",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    session.flush()
+    pkg = build_context_package(session, "TASK-MEM-SHARED", tmp_path)
+    assert "agent_memory" in pkg
+    assert "Always run ruff before committing." in pkg["agent_memory"]["shared_skills"]
+
+
+def test_context_packager_last_used_at_updated(session, tmp_path):
+    """Context packager touches last_used_at on every injected memory."""
+    from orchestrator.orchestrator.db import AgentMemory as AM
+
+    make_task(session, "TASK-MEM-LU", owner="backend-agent")
+    mem = _make_memory(
+        session,
+        agent_id="backend-agent",
+        memory_type="identity",
+        key="identity",
+        content="Backend identity.",
+    )
+    assert mem.last_used_at is None
+    build_context_package(session, "TASK-MEM-LU", tmp_path)
+    session.flush()
+    refreshed = session.get(AM, mem.id)
+    assert refreshed.last_used_at is not None
+
+
+def test_context_packager_shared_does_not_bleed_to_agent_skills(session, tmp_path):
+    """Shared conventions appear under shared_skills, not under skills."""
+    make_task(session, "TASK-MEM-NOSB", owner="backend-agent")
+    now = datetime.now(timezone.utc)
+    session.add(
+        AgentMemory(
+            id=uuid.uuid4(),
+            agent_id="shared",
+            project_id="default",
+            memory_type="convention",
+            key="shared/rule-1",
+            content="Shared rule.",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    session.flush()
+    pkg = build_context_package(session, "TASK-MEM-NOSB", tmp_path)
+    assert pkg["agent_memory"]["skills"] == []
+    assert "Shared rule." in pkg["agent_memory"]["shared_skills"]

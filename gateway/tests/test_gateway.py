@@ -648,3 +648,159 @@ def test_git_merge_missing_branch_returns_500(client, session, git_repo):
         },
     )
     assert resp.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# Memory search (Improvement 2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def memory_search_run(session):
+    """Running task + run row + two memory rows for search tests."""
+    import uuid
+    from datetime import datetime, timezone
+
+    from orchestrator.orchestrator.db import AgentMemory
+
+    task = make_task(session, "TASK-GMS", status="running", owner="backend-agent")
+    make_run(session, task.id, agent_id="backend-agent")
+    now = datetime.now(timezone.utc)
+    for key, content in [
+        ("skill/db-session/TASK-GMS", "Always use the db_session dependency."),
+        ("skill/ruff-check/TASK-GMS", "Always run ruff check before committing."),
+    ]:
+        session.add(
+            AgentMemory(
+                id=uuid.uuid4(),
+                agent_id="backend-agent",
+                project_id="default",
+                memory_type="skill",
+                key=key,
+                content=content,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    session.flush()
+    return task.id
+
+
+def test_memory_search_returns_matching_rows(client, memory_search_run):
+    resp = client.post(
+        "/memory/search",
+        json={"task_id": memory_search_run, "query": "ruff", "max_results": 5},
+    )
+    assert resp.status_code == 200
+    results = resp.json()["results"]
+    assert len(results) == 1
+    assert "ruff" in results[0]["snippet"]
+
+
+def test_memory_search_empty_query_returns_all(client, memory_search_run):
+    resp = client.post(
+        "/memory/search",
+        json={"task_id": memory_search_run, "query": "session", "max_results": 5},
+    )
+    assert resp.status_code == 200
+    assert len(resp.json()["results"]) >= 1
+
+
+def test_memory_search_includes_shared_pool(client, session, memory_search_run):
+    """search_memory returns shared conventions alongside agent-specific memories."""
+    import uuid
+    from datetime import datetime, timezone
+
+    from orchestrator.orchestrator.db import AgentMemory
+
+    now = datetime.now(timezone.utc)
+    session.add(
+        AgentMemory(
+            id=uuid.uuid4(),
+            agent_id="shared",
+            project_id="default",
+            memory_type="convention",
+            key="shared/project-conventions",
+            content="All agents must run pytest before task_complete.",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    session.flush()
+    resp = client.post(
+        "/memory/search",
+        json={"task_id": memory_search_run, "query": "pytest", "max_results": 5},
+    )
+    assert resp.status_code == 200
+    snippets = [r["snippet"] for r in resp.json()["results"]]
+    assert any("pytest" in s for s in snippets)
+
+
+def test_memory_search_not_running_returns_403(client, session):
+    make_task(session, "TASK-GMS-403", status="assigned")
+    session.flush()
+    resp = client.post(
+        "/memory/search",
+        json={"task_id": "TASK-GMS-403", "query": "anything"},
+    )
+    assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Skill deduplication (Improvement 3)
+# ---------------------------------------------------------------------------
+
+
+def test_skill_dedup_reuses_existing_row(client, session):
+    """Writing skill/{topic}/{task_id2} when skill/{topic}/{task_id1} exists updates the old row."""
+    import uuid
+    from datetime import datetime, timezone
+
+    from orchestrator.orchestrator.db import AgentMemory
+
+    # Set up running tasks for two sequential runs on the same topic.
+    task1 = make_task(session, "TASK-GDEDUP1", status="running", owner="backend-agent")
+    make_run(session, task1.id, agent_id="backend-agent")
+    now = datetime.now(timezone.utc)
+    session.add(
+        AgentMemory(
+            id=uuid.uuid4(),
+            agent_id="backend-agent",
+            project_id="default",
+            memory_type="skill",
+            key="skill/db-pattern/TASK-GDEDUP1",
+            content="Original skill content.",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    session.flush()
+
+    task2 = make_task(session, "TASK-GDEDUP2", status="running", owner="backend-agent")
+    make_run(session, task2.id, agent_id="backend-agent")
+    session.flush()
+
+    # Write a new skill with the same topic from task2.
+    resp = client.post(
+        "/memory/upsert",
+        json={
+            "task_id": "TASK-GDEDUP2",
+            "project_id": "default",
+            "memory_type": "skill",
+            "key": "skill/db-pattern/TASK-GDEDUP2",
+            "content": "Updated skill content.",
+        },
+    )
+    assert resp.status_code == 200
+
+    # Only one row for this topic should exist.
+    rows = (
+        session.query(AgentMemory)
+        .filter(
+            AgentMemory.agent_id == "backend-agent",
+            AgentMemory.key.like("skill/db-pattern/%"),
+        )
+        .all()
+    )
+    assert len(rows) == 1
+    assert rows[0].content == "Updated skill content."

@@ -709,12 +709,17 @@ def memory_list(
         typer.echo("  No memory entries found.")
         return
 
-    typer.echo(f"\n  {'ID'[:8]:<10} {'AGENT':<22} {'TYPE':<10} {'KEY':<35} UPDATED")
-    typer.echo(f"  {'-' * 8:<10} {'-' * 22:<22} {'-' * 8:<10} {'-' * 35:<35} -------")
+    typer.echo(
+        f"\n  {'ID'[:8]:<10} {'AGENT':<22} {'TYPE':<12} {'KEY':<35} {'UPDATED':<20} LAST USED"
+    )
+    typer.echo(
+        f"  {'-' * 8:<10} {'-' * 22:<22} {'-' * 10:<12} {'-' * 35:<35} {'-' * 19:<20} ---------"
+    )
     for m in rows:
+        last_used = (m.get("last_used_at") or "")[:19] or "(never)"
         typer.echo(
-            f"  {m['id'][:8]:<10} {m['agent_id'][:22]:<22} {m['memory_type'][:10]:<10} "
-            f"{m['key'][:35]:<35} {m['updated_at'][:19]}"
+            f"  {m['id'][:8]:<10} {m['agent_id'][:22]:<22} {m['memory_type'][:12]:<12} "
+            f"{m['key'][:35]:<35} {m['updated_at'][:19]:<20} {last_used}"
         )
     typer.echo(f"\n  {len(rows)} entr{'y' if len(rows) == 1 else 'ies'}")
 

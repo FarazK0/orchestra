@@ -138,6 +138,7 @@ class AgentMemorySchema(BaseModel):
     source_task_id: str | None
     created_at: str
     updated_at: str
+    last_used_at: str | None
 
     @classmethod
     def from_orm(cls, m: Any) -> "AgentMemorySchema":
@@ -151,6 +152,7 @@ class AgentMemorySchema(BaseModel):
             source_task_id=m.source_task_id,
             created_at=m.created_at.isoformat(),
             updated_at=m.updated_at.isoformat(),
+            last_used_at=m.last_used_at.isoformat() if m.last_used_at else None,
         )
 
 

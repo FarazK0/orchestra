@@ -261,6 +261,47 @@ def _seed_identity(
         log.warning("Failed to seed identity memory for %s: %s", agent_id, exc)
 
 
+def _seed_shared_conventions(
+    snapshot: str,
+    description: str,
+    gateway_url: str,
+    sample_task_id: str,
+) -> None:
+    """Write project-level conventions into the shared memory pool (agent_id='shared').
+
+    These are injected into every agent's context package under 'shared_skills',
+    regardless of their type. Called once per change request.
+    """
+    content = (
+        "## Project conventions\n"
+        "- Follow existing file structure and naming conventions before introducing new ones.\n"
+        "- Run `ruff check .` and `pytest` before calling task_complete.\n"
+        "- Keep changes minimal and scoped to the task's output files.\n"
+        "- Commit messages use the [TASK-ID] prefix provided in agent_instructions.\n\n"
+        f"## Project snapshot\n{snapshot[:600]}\n\n"
+        f"## Current change request\n{description[:300]}"
+    )[:2000]
+
+    try:
+        with httpx.Client(base_url=gateway_url, timeout=10.0) as client:
+            resp = client.post(
+                "/memory/upsert",
+                json={
+                    "task_id": sample_task_id,
+                    "agent_id": "shared",
+                    "project_id": "default",
+                    "memory_type": "convention",
+                    "key": "shared/project-conventions",
+                    "content": content,
+                },
+                headers={"X-Platform-Actor": "root-agent"},
+            )
+            resp.raise_for_status()
+        log.info("Seeded shared project conventions")
+    except Exception as exc:
+        log.warning("Failed to seed shared conventions: %s", exc)
+
+
 # ---------------------------------------------------------------------------
 # Task submission
 # ---------------------------------------------------------------------------
@@ -317,6 +358,7 @@ def _submit_tasks(
     # Seed identity memory for each unique agent type in the plan.
     seen_agents: set[str] = set()
     task_ids = list(title_to_id.values())
+    sample_task_id_for_shared = task_ids[0] if task_ids else ""
     for task_def in ordered:
         agent_id = task_def["owner"]
         if agent_id in seen_agents:
@@ -324,6 +366,10 @@ def _submit_tasks(
         seen_agents.add(agent_id)
         sample_task_id = title_to_id[task_def["title"]]
         _seed_identity(agent_id, snapshot, description, orch_url, gateway_url, sample_task_id)
+
+    # Seed shared project conventions for all agents.
+    if sample_task_id_for_shared:
+        _seed_shared_conventions(snapshot, description, gateway_url, sample_task_id_for_shared)
 
     return task_ids
 
