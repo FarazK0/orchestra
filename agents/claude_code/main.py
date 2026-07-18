@@ -35,6 +35,7 @@ app = typer.Typer(name="claude-code-agent", add_completion=False)
 
 def _build_instruction(pkg: dict, repo_path: str) -> str:
     task = pkg["task"]
+    task_owner: str = task.get("owner", "claude-code-agent")
     branch = pkg["agent_instructions"]["branch"]
 
     inputs_list = "\n".join(f"- {p}" for p in task["inputs"]) if task["inputs"] else "(none)"
@@ -88,6 +89,7 @@ def _build_instruction(pkg: dict, repo_path: str) -> str:
         memory_section = "\n".join(parts)
 
     return f"""\
+You are acting as {task_owner} for this project.
 You are working on a software development task in the Git repository at {repo_path}.
 Your work will be committed to branch `{branch}` (already checked out for you).
 
@@ -146,6 +148,7 @@ def main(
     """Run the Claude Code CLI agent for a given context package."""
     pkg = json.loads(Path(context).read_text(encoding="utf-8"))
     task_id: str = pkg["task_id"]
+    task_owner: str = pkg["task"]["owner"]
     branch: str = pkg["agent_instructions"]["branch"]
     commit_prefix: str = pkg["agent_instructions"].get("commit_prefix", f"[{task_id}]")
 
@@ -163,7 +166,7 @@ def main(
                 "POST",
                 f"{gw_url}/git/branch",
                 json={
-                    "agent_id": "claude-code-agent",
+                    "agent_id": task_owner,
                     "task_id": task_id,
                     "repo_path": repo_path,
                     "branch": branch,
@@ -232,10 +235,10 @@ def main(
                 "POST",
                 f"{gw_url}/git/commit",
                 json={
-                    "agent_id": "claude-code-agent",
+                    "agent_id": task_owner,
                     "task_id": task_id,
                     "repo_path": repo_path,
-                    "message": f"{commit_prefix} claude-code agent output",
+                    "message": f"{commit_prefix} {task_owner} output",
                     "paths": changed_paths,
                 },
             )
@@ -271,13 +274,13 @@ def main(
                 f"{gw_url}/memory/upsert",
                 json={
                     "task_id": task_id,
-                    "agent_id": "claude-code-agent",
+                    "agent_id": task_owner,
                     "project_id": "default",
                     "memory_type": "skill",
                     "key": f"skill/{task_id}",
                     "content": skill_content,
                 },
-                headers={"X-Platform-Actor": "claude-code-agent"},
+                headers={"X-Platform-Actor": task_owner},
             )
             log.info("Skill memory written for task %s", task_id)
         except Exception as exc:
