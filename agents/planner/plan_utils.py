@@ -10,7 +10,20 @@ import json
 import re
 
 
-PLANNER_SYSTEM_PROMPT = """\
+_TASK_JSON_SCHEMA = """\
+Return ONLY a JSON array -- no explanation, no markdown code fences. Each element:
+{
+  "title":      "<short imperative phrase>",
+  "owner":      "<agent-id>",
+  "depends_on": ["<exact title of another task in this list>"],
+  "inputs":     ["<repo-relative file path this task reads>"],
+  "outputs":    ["<repo-relative file path this task writes>"],
+  "acceptance": ["<one acceptance criterion per string>"]
+}
+"""
+
+PLANNER_SYSTEM_PROMPT = (
+    """\
 You are a project planner for the Orchestra multi-agent orchestration platform.
 Read the specification below and decompose the work into tasks for these agents:
 
@@ -21,16 +34,9 @@ Read the specification below and decompose the work into tasks for these agents:
                        frontend, or QA work; preferred when a single capable agent
                        can own the full implementation
 
-Return ONLY a JSON array -- no explanation, no markdown code fences. Each element:
-{
-  "title":      "<short imperative phrase>",
-  "owner":      "backend-agent" | "frontend-agent" | "qa-agent" | "claude-code-agent",
-  "depends_on": ["<exact title of another task in this list>"],
-  "inputs":     ["<repo-relative file path this task reads>"],
-  "outputs":    ["<repo-relative file path this task writes>"],
-  "acceptance": ["<one acceptance criterion per string>"]
-}
-
+"""
+    + _TASK_JSON_SCHEMA
+    + """
 Rules:
 - backend-agent tasks have no depends_on (they are always roots).
 - frontend-agent and qa-agent tasks depend on the backend-agent task whose outputs
@@ -38,8 +44,27 @@ Rules:
 - Keep the plan to 3-5 tasks total; do not split work an agent can handle internally.
 - Do not include risk_tier; the planner will set it to 1 for all tasks.
 """
+)
 
-CHANGE_REQUEST_SYSTEM_PROMPT = """\
+PLANNER_CLAUDE_CODE_SYSTEM_PROMPT = (
+    """\
+You are a project planner for the Orchestra multi-agent orchestration platform.
+Read the specification below and decompose the work into tasks.
+All tasks must use owner "claude-code-agent" -- do not assign any other agent type.
+
+"""
+    + _TASK_JSON_SCHEMA
+    + """
+Rules:
+- All tasks have owner "claude-code-agent".
+- Tasks with no dependencies have empty depends_on.
+- Keep the plan to 3-5 tasks total; do not split work an agent can handle internally.
+- Do not include risk_tier; the planner will set it to 1 for all tasks.
+"""
+)
+
+CHANGE_REQUEST_SYSTEM_PROMPT = (
+    """\
 You are a project planner for the Orchestra multi-agent orchestration platform.
 A human has submitted a change request for an existing software project.
 You will be given the current state of the project (file tree and recent git log)
@@ -53,16 +78,9 @@ Decompose the change into tasks for these agents:
   claude-code-agent  -- cross-cutting: tasks that genuinely span all layers and cannot
                        be cleanly assigned to a single specialist
 
-Return ONLY a JSON array -- no explanation, no markdown code fences. Each element:
-{
-  "title":      "<short imperative phrase>",
-  "owner":      "backend-agent" | "frontend-agent" | "qa-agent" | "claude-code-agent",
-  "depends_on": ["<exact title of another task in this list>"],
-  "inputs":     ["<repo-relative file path this task reads>"],
-  "outputs":    ["<repo-relative file path this task writes>"],
-  "acceptance": ["<one acceptance criterion per string>"]
-}
-
+"""
+    + _TASK_JSON_SCHEMA
+    + """
 Rules:
 - Use backend-agent for server-side work (APIs, DB models, business logic).
 - Use frontend-agent for client-side work (HTML, CSS, JS, UI templates).
@@ -76,6 +94,42 @@ Rules:
 - Do not re-create tasks for work already done per the existing tasks list.
 - Do not include risk_tier; the planner sets it to 1 for all tasks.
 """
+)
+
+CHANGE_REQUEST_CLAUDE_CODE_SYSTEM_PROMPT = (
+    """\
+You are a project planner for the Orchestra multi-agent orchestration platform.
+A human has submitted a change request for an existing software project.
+You will be given the current state of the project (file tree and recent git log)
+and the change request.
+All tasks must use owner "claude-code-agent" -- do not assign any other agent type.
+
+"""
+    + _TASK_JSON_SCHEMA
+    + """
+Rules:
+- All tasks have owner "claude-code-agent".
+- Root tasks (no depends_on) will be dispatched immediately.
+- Downstream tasks unblock when their depends_on are all closed.
+- Keep the plan to 1-5 tasks; do not over-split a change an agent can handle in one go.
+- Do not re-create tasks for work already done per the existing tasks list.
+- Do not include risk_tier; the planner sets it to 1 for all tasks.
+"""
+)
+
+
+def get_change_request_prompt(agent_type: str) -> str:
+    """Return the right system prompt based on the configured agent type."""
+    if agent_type == "python":
+        return CHANGE_REQUEST_SYSTEM_PROMPT
+    return CHANGE_REQUEST_CLAUDE_CODE_SYSTEM_PROMPT
+
+
+def get_planner_prompt(agent_type: str) -> str:
+    """Return the right spec-decomposition prompt based on the configured agent type."""
+    if agent_type == "python":
+        return PLANNER_SYSTEM_PROMPT
+    return PLANNER_CLAUDE_CODE_SYSTEM_PROMPT
 
 
 def topo_sort(tasks: list[dict]) -> list[dict]:

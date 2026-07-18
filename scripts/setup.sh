@@ -335,24 +335,32 @@ if [ -n "$SPEC" ]; then
     _AUTO_PLAN="$RUN_STORE_DIR/auto-plan.json"
     echo "  Using claude CLI to decompose spec (no API key required)..."
     echo "  $(_dim 'Reading spec and planning tasks — usually takes 30-90 seconds...')"
+    if [ "${AGENT_TYPE:-claude-code}" = "python" ]; then
+      _OWNER_RULES='Agent routing rules:
+  backend-agent     -- APIs, DB models, business logic, migrations, server-side tests
+  frontend-agent    -- HTML, CSS, JavaScript, single-page UI, browser templates
+  qa-agent          -- test plans and QA reports only, no new feature implementation
+  claude-code-agent -- only for tasks that genuinely span all layers
+Additional rules: backend-agent tasks have empty depends_on (they are roots);
+frontend-agent and qa-agent tasks list their backend dependency in depends_on.'
+      _OWNER_FIELD='"owner": "backend-agent" or "frontend-agent" or "qa-agent" or "claude-code-agent"'
+    else
+      _OWNER_RULES='All tasks must use owner "claude-code-agent" -- do not assign any other agent type.'
+      _OWNER_FIELD='"owner": "claude-code-agent"'
+    fi
     env -u ANTHROPIC_API_KEY claude --dangerously-skip-permissions -p \
       "Read the spec file at $REPO/$SPEC and produce an Orchestra task plan.
 Return ONLY a JSON array, no explanation or markdown. Each element:
 {
   \"title\": \"<short imperative phrase>\",
-  \"owner\": \"backend-agent\" or \"frontend-agent\" or \"qa-agent\" or \"claude-code-agent\",
+  $_OWNER_FIELD,
   \"depends_on\": [\"<exact title of a task in this list>\"],
   \"inputs\": [\"<repo-relative path to read>\"],
   \"outputs\": [\"<repo-relative path to write>\"],
   \"acceptance\": [\"<one acceptance criterion>\"]
 }
-Agent routing rules:
-  backend-agent     -- APIs, DB models, business logic, migrations, server-side tests
-  frontend-agent    -- HTML, CSS, JavaScript, single-page UI, browser templates
-  qa-agent          -- test plans and QA reports only, no new feature implementation
-  claude-code-agent -- only for tasks that genuinely span all layers
-Rules: keep to 3-5 tasks; backend-agent tasks have empty depends_on (they are roots);
-frontend-agent and qa-agent tasks list their backend dependency in depends_on; be specific." \
+$_OWNER_RULES
+Rules: keep to 3-5 tasks; tasks with no dependencies have empty depends_on; be specific." \
       </dev/null > "$_AUTO_PLAN"
     PLAN="$_AUTO_PLAN"
     SPEC=""

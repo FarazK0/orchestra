@@ -31,7 +31,7 @@ import httpx
 import typer
 from dotenv import load_dotenv
 
-from agents.planner.plan_utils import CHANGE_REQUEST_SYSTEM_PROMPT, parse_task_plan, topo_sort
+from agents.planner.plan_utils import get_change_request_prompt, parse_task_plan, topo_sort
 from agents.shared.llm import LLMClient
 from orchestrator.orchestrator.db import get_engine, get_session_factory
 from orchestrator.orchestrator.streams import ROOT_STREAM_KEY, StreamConsumer
@@ -146,10 +146,11 @@ def _fetch_existing_tasks(orch_url: str) -> str:
 
 
 def _decompose_with_claude(
-    description: str, spec_content: str, snapshot: str, existing_tasks: str
+    description: str, spec_content: str, snapshot: str, existing_tasks: str, agent_type: str
 ) -> str:
     """Call the claude CLI to decompose a change request. Returns raw text."""
-    prompt = f"{CHANGE_REQUEST_SYSTEM_PROMPT}\n\n## Project state\n\n{snapshot}\n\n"
+    system_prompt = get_change_request_prompt(agent_type)
+    prompt = f"{system_prompt}\n\n## Project state\n\n{snapshot}\n\n"
     if existing_tasks:
         prompt += f"\n{existing_tasks}\n\n"
     prompt += f"## Change request\n\n{description}\n"
@@ -171,7 +172,7 @@ def _decompose_with_claude(
 
 
 def _decompose_with_llm(
-    description: str, spec_content: str, snapshot: str, existing_tasks: str
+    description: str, spec_content: str, snapshot: str, existing_tasks: str, agent_type: str
 ) -> str:
     """Call the LLM API to decompose a change request. Returns raw text."""
     user_content = f"## Project state\n\n{snapshot}\n\n"
@@ -184,7 +185,7 @@ def _decompose_with_llm(
     llm = LLMClient()
     response = llm.call(
         messages=[{"role": "user", "content": user_content}],
-        system=CHANGE_REQUEST_SYSTEM_PROMPT,
+        system=get_change_request_prompt(agent_type),
         run_id=None,
         session=None,
         max_tokens=2048,
@@ -497,9 +498,13 @@ class RootAgent:
         use_api = self._agent_type == "python" and os.getenv("ANTHROPIC_API_KEY", "").strip()
         try:
             if use_api:
-                raw = _decompose_with_llm(description, spec_content, snapshot, existing_tasks)
+                raw = _decompose_with_llm(
+                    description, spec_content, snapshot, existing_tasks, self._agent_type
+                )
             else:
-                raw = _decompose_with_claude(description, spec_content, snapshot, existing_tasks)
+                raw = _decompose_with_claude(
+                    description, spec_content, snapshot, existing_tasks, self._agent_type
+                )
         except Exception as exc:
             log.error("Decomposition failed for change [%s]: %s", change_id, exc)
             return
