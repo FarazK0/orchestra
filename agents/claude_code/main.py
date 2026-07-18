@@ -258,6 +258,31 @@ def main(
             log.error("Transition to completed failed: %s", exc.response.text)
             raise typer.Exit(1)
 
+        # ── 6. Write skill memory ──────────────────────────────────────────
+        task_title = pkg.get("task", {}).get("title", task_id)
+        files_summary = ", ".join(changed_paths[:20]) or "(none)"
+        skill_content = (f"Task: {task_title}\nFiles produced: {files_summary}\nBranch: {branch}")[
+            :2000
+        ]
+        try:
+            _call(
+                http,
+                "POST",
+                f"{gw_url}/memory/upsert",
+                json={
+                    "task_id": task_id,
+                    "agent_id": "claude-code-agent",
+                    "project_id": "default",
+                    "memory_type": "skill",
+                    "key": f"skill/{task_id}",
+                    "content": skill_content,
+                },
+                headers={"X-Platform-Actor": "claude-code-agent"},
+            )
+            log.info("Skill memory written for task %s", task_id)
+        except Exception as exc:
+            log.warning("Skill memory write failed (non-fatal): %s", exc)
+
     log.info("Claude Code agent done: task=%s", task_id)
 
 

@@ -111,13 +111,48 @@ def _project_snapshot(repo_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _decompose_with_claude(description: str, spec_content: str, snapshot: str) -> str:
+def _fetch_existing_tasks(orch_url: str) -> str:
+    """Return a compact summary of all non-failed tasks for injection into the planner prompt."""
+    import httpx
+
+    try:
+        with httpx.Client(base_url=orch_url, timeout=10.0) as client:
+            tasks = client.get("/tasks").json()
+    except Exception as exc:
+        log.warning("Could not fetch existing tasks: %s", exc)
+        return ""
+
+    if not isinstance(tasks, list) or not tasks:
+        return ""
+
+    active_statuses = {
+        "created",
+        "assigned",
+        "running",
+        "completed",
+        "validated",
+        "merged",
+        "closed",
+    }
+    lines = []
+    for t in tasks:
+        status = t.get("status", "")
+        if status in active_statuses:
+            lines.append(f"  [{t['id']}] ({status}) {t['title']}")
+
+    if not lines:
+        return ""
+    return "## Existing tasks (do not re-create these)\n" + "\n".join(lines)
+
+
+def _decompose_with_claude(
+    description: str, spec_content: str, snapshot: str, existing_tasks: str
+) -> str:
     """Call the claude CLI to decompose a change request. Returns raw text."""
-    prompt = (
-        f"{CHANGE_REQUEST_SYSTEM_PROMPT}\n\n"
-        f"## Project state\n\n{snapshot}\n\n"
-        f"## Change request\n\n{description}\n"
-    )
+    prompt = f"{CHANGE_REQUEST_SYSTEM_PROMPT}\n\n## Project state\n\n{snapshot}\n\n"
+    if existing_tasks:
+        prompt += f"\n{existing_tasks}\n\n"
+    prompt += f"## Change request\n\n{description}\n"
     if spec_content:
         prompt += f"\n## Additional spec\n\n{spec_content}\n"
 
@@ -135,9 +170,14 @@ def _decompose_with_claude(description: str, spec_content: str, snapshot: str) -
     return result.stdout
 
 
-def _decompose_with_llm(description: str, spec_content: str, snapshot: str) -> str:
+def _decompose_with_llm(
+    description: str, spec_content: str, snapshot: str, existing_tasks: str
+) -> str:
     """Call the LLM API to decompose a change request. Returns raw text."""
-    user_content = f"## Project state\n\n{snapshot}\n\n## Change request\n\n{description}\n"
+    user_content = f"## Project state\n\n{snapshot}\n\n"
+    if existing_tasks:
+        user_content += f"\n{existing_tasks}\n\n"
+    user_content += f"## Change request\n\n{description}\n"
     if spec_content:
         user_content += f"\n## Additional spec\n\n{spec_content}\n"
 
@@ -446,13 +486,20 @@ class RootAgent:
         # Snapshot the project.
         snapshot = _project_snapshot(self._repo)
 
+        # Fetch existing tasks so the planner can avoid re-creating closed work.
+        existing_tasks = _fetch_existing_tasks(self._orch_url)
+        if existing_tasks:
+            log.info(
+                "Injecting %d existing task(s) into planner context", existing_tasks.count("\n")
+            )
+
         # Decompose into tasks.
         use_api = self._agent_type == "python" and os.getenv("ANTHROPIC_API_KEY", "").strip()
         try:
             if use_api:
-                raw = _decompose_with_llm(description, spec_content, snapshot)
+                raw = _decompose_with_llm(description, spec_content, snapshot, existing_tasks)
             else:
-                raw = _decompose_with_claude(description, spec_content, snapshot)
+                raw = _decompose_with_claude(description, spec_content, snapshot, existing_tasks)
         except Exception as exc:
             log.error("Decomposition failed for change [%s]: %s", change_id, exc)
             return

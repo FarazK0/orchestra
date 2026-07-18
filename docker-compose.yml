@@ -5,6 +5,7 @@ services:
       POSTGRES_USER: orchestra
       POSTGRES_PASSWORD: orchestra
       POSTGRES_DB: orchestra
+      POSTGRES_HOST_AUTH_METHOD: trust
     ports:
       - "5433:5432"
     volumes:

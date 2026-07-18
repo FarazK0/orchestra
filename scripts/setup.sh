@@ -309,13 +309,19 @@ if [ -n "$SPEC" ]; then
 Return ONLY a JSON array, no explanation or markdown. Each element:
 {
   \"title\": \"<short imperative phrase>\",
-  \"owner\": \"claude-code-agent\",
+  \"owner\": \"backend-agent\" or \"frontend-agent\" or \"qa-agent\" or \"claude-code-agent\",
   \"depends_on\": [\"<exact title of a task in this list>\"],
   \"inputs\": [\"<repo-relative path to read>\"],
   \"outputs\": [\"<repo-relative path to write>\"],
   \"acceptance\": [\"<one acceptance criterion>\"]
 }
-Rules: keep to 1-4 tasks; tasks with no dependencies have empty depends_on; be specific." \
+Agent routing rules:
+  backend-agent     -- APIs, DB models, business logic, migrations, server-side tests
+  frontend-agent    -- HTML, CSS, JavaScript, single-page UI, browser templates
+  qa-agent          -- test plans and QA reports only, no new feature implementation
+  claude-code-agent -- only for tasks that genuinely span all layers
+Rules: keep to 3-5 tasks; backend-agent tasks have empty depends_on (they are roots);
+frontend-agent and qa-agent tasks list their backend dependency in depends_on; be specific." \
       </dev/null > "$_AUTO_PLAN"
     PLAN="$_AUTO_PLAN"
     SPEC=""

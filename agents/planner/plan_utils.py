@@ -47,16 +47,16 @@ and the change request.
 
 Decompose the change into tasks for these agents:
 
-  claude-code-agent  -- general purpose: preferred for most work; handles backend,
-                       frontend, or QA work using the Claude Code CLI
-  backend-agent      -- server-side: APIs, data models, business logic, tests
-  frontend-agent     -- client-side: HTML, CSS, JavaScript, single-page UI
-  qa-agent           -- quality: test plans, QA reports, risk assessment
+  backend-agent      -- server-side: APIs, data models, business logic, migrations, tests
+  frontend-agent     -- client-side: HTML, CSS, JavaScript, single-page UI, templates
+  qa-agent           -- quality only: test plans, QA reports, risk assessment (no implementation)
+  claude-code-agent  -- cross-cutting: tasks that genuinely span all layers and cannot
+                       be cleanly assigned to a single specialist
 
 Return ONLY a JSON array -- no explanation, no markdown code fences. Each element:
 {
   "title":      "<short imperative phrase>",
-  "owner":      "claude-code-agent" | "backend-agent" | "frontend-agent" | "qa-agent",
+  "owner":      "backend-agent" | "frontend-agent" | "qa-agent" | "claude-code-agent",
   "depends_on": ["<exact title of another task in this list>"],
   "inputs":     ["<repo-relative file path this task reads>"],
   "outputs":    ["<repo-relative file path this task writes>"],
@@ -64,11 +64,16 @@ Return ONLY a JSON array -- no explanation, no markdown code fences. Each elemen
 }
 
 Rules:
-- Prefer claude-code-agent unless there is a clear reason to split by layer.
+- Use backend-agent for server-side work (APIs, DB models, business logic).
+- Use frontend-agent for client-side work (HTML, CSS, JS, UI templates).
+- Use qa-agent for test-only tasks that validate existing features, not implement them.
+- Use claude-code-agent only for tasks that genuinely cross all layers.
+- backend-agent tasks have no depends_on (they are always roots).
+- frontend-agent and qa-agent tasks depend on the backend tasks whose outputs they consume.
 - Root tasks (no depends_on) will be dispatched immediately.
 - Downstream tasks unblock when their depends_on are all closed.
 - Keep the plan to 1-5 tasks; do not over-split a change an agent can handle in one go.
-- Do not re-do work that is already done per the project state snapshot.
+- Do not re-create tasks for work already done per the existing tasks list.
 - Do not include risk_tier; the planner sets it to 1 for all tasks.
 """
 
