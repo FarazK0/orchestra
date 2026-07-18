@@ -68,6 +68,37 @@ echo "  $(_dim '│')                         Agents ◄────────
 echo "  $(_dim '└─────────────────────────────────────────────────────────────────┘')"
 echo ""
 
+# ── 0. UI mode ────────────────────────────────────────────────────────────────
+UI_MODE="direct"
+
+sep "Choose your interface"
+echo ""
+echo "  $(_cyan '1')  $(_bold 'Claude Code UI')  $(_dim '(recommended)')"
+echo "     $(_dim 'Opens a Claude Code session after setup with /orcui as the control panel.')"
+echo "     $(_dim 'Talk to Orchestra in plain English — no CLI commands to memorise.')"
+echo "     $(_dim 'Requires the claude CLI: npm install -g @anthropic-ai/claude-code')"
+echo ""
+echo "  $(_cyan '2')  $(_bold 'Direct / terminal mode')"
+echo "     $(_dim 'Classic CLI workflow: orchctl commands, review loop, manual approval.')"
+echo "     $(_dim 'Use this if you prefer raw control or are scripting.')"
+echo ""
+printf "  Choice [1/2]: "
+read -r _ui_choice
+
+if [ "${_ui_choice:-1}" = "2" ]; then
+  UI_MODE="direct"
+  echo "  Interface: $(_green 'direct')"
+else
+  if ! command -v claude &>/dev/null; then
+    echo "  $(_dim 'claude CLI not found — falling back to direct mode.')"
+    echo "  $(_dim 'Install with: npm install -g @anthropic-ai/claude-code, then run claude login')"
+    UI_MODE="direct"
+  else
+    UI_MODE="claudecode"
+    echo "  Interface: $(_green 'Claude Code UI')  $(_dim '(/orcui will open automatically)')"
+  fi
+fi
+
 # ── 1. Prerequisites ──────────────────────────────────────────────────────────
 sep "Checking prerequisites"
 
@@ -354,23 +385,40 @@ if [ -n "$PLAN" ]; then
     --orchestrator-url "$ORCH_URL"
 fi
 
-# ── 12. Offer interactive review loop ─────────────────────────────────────────
-if [ -n "$SPEC" ] || [ -n "$PLAN" ]; then
+# ── 12. Hand off to UI ────────────────────────────────────────────────────────
+if [ "$UI_MODE" = "claudecode" ]; then
   echo ""
   echo "  $(_dim '════════════════════════════════════════════════════════════')"
-  echo "  Tasks are running. When agents finish, you need to approve and merge their work."
+  echo "  $(_bold '  Launching Claude Code UI')"
+  echo "  $(_dim '════════════════════════════════════════════════════════════')"
   echo ""
-  echo "  $(_cyan 'a')  Start the review loop now  $(_dim '(waits for agents, validates, prompts approval)')"
-  echo "  $(_cyan 'b')  Exit and review later with:  $(_bold 'uv run orchctl review --repo') $REPO"
+  echo "  $(_cyan '/orcui')              — show platform status and task list"
+  echo "  $(_cyan '/orcui <request>')    — plain English: 'merge task 5', 'show logs', etc."
+  echo "  $(_cyan '/arch-to-tasks')      — decompose a spec into a task plan"
   echo ""
-  printf "  Choice [a/b]: "
-  read -r _review_choice
-  if [ "${_review_choice:-a}" != "b" ]; then
+  echo "  $(_dim 'Starting Claude Code in') $ROOT $(_dim '...')"
+  echo ""
+  cd "$ROOT"
+  exec claude
+else
+  # Direct mode: existing review loop
+  if [ -n "$SPEC" ] || [ -n "$PLAN" ]; then
     echo ""
-    uv run python -m cli.main review --repo "$REPO"
-  else
+    echo "  $(_dim '════════════════════════════════════════════════════════════')"
+    echo "  Tasks are running. When agents finish, you need to approve and merge their work."
     echo ""
-    echo "  When ready:"
-    echo "    $(_cyan "uv run orchctl review --repo $REPO")"
+    echo "  $(_cyan 'a')  Start the review loop now  $(_dim '(waits for agents, validates, prompts approval)')"
+    echo "  $(_cyan 'b')  Exit and review later with:  $(_bold 'uv run orchctl review --repo') $REPO"
+    echo ""
+    printf "  Choice [a/b]: "
+    read -r _review_choice
+    if [ "${_review_choice:-a}" != "b" ]; then
+      echo ""
+      uv run python -m cli.main review --repo "$REPO"
+    else
+      echo ""
+      echo "  When ready:"
+      echo "    $(_cyan "uv run orchctl review --repo $REPO")"
+    fi
   fi
 fi
