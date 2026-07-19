@@ -247,3 +247,77 @@ class TestValidateTask:
         )
         assert len(events) == 1
         assert events[0].payload["validation_passed"] is False
+
+    # ---------------------------------------------------------------------------
+    # Provenance gate tests
+    # ---------------------------------------------------------------------------
+
+    def test_rejects_external_provenance_output(self, session, git_repo):
+        """validate_task raises ValidationError when an output has provenance=external."""
+        from orchestrator.orchestrator.db import ArtifactProvenance
+
+        task_id = "TASK-V10"
+        task = make_task(session, task_id, status="completed")
+        task.outputs = ["report.md"]
+        session.flush()
+
+        _make_agent_branch(git_repo, task_id, extra_files={"report.md": "# scraped\n"})
+
+        prov = ArtifactProvenance(
+            repo_path=str(git_repo),
+            file_path="report.md",
+            provenance="external",
+            set_by_task=task_id,
+            set_at=datetime.now(timezone.utc),
+        )
+        session.add(prov)
+        session.flush()
+
+        with pytest.raises(ValidationError, match="external-provenance"):
+            validate_task(session, task_id, str(git_repo))
+
+        session.refresh(task)
+        assert task.status == "completed"
+
+    def test_agent_provenance_does_not_block_validation(self, session, git_repo):
+        """validate_task succeeds when output has provenance=agent."""
+        from orchestrator.orchestrator.db import ArtifactProvenance
+
+        task_id = "TASK-V11"
+        task = make_task(session, task_id, status="completed")
+        task.outputs = ["output.py"]
+        session.flush()
+
+        _make_agent_branch(git_repo, task_id, extra_files={"output.py": "x = 1\n"})
+        _make_run(session, task_id)
+
+        prov = ArtifactProvenance(
+            repo_path=str(git_repo),
+            file_path="output.py",
+            provenance="agent",
+            set_by_task=task_id,
+            set_at=datetime.now(timezone.utc),
+        )
+        session.add(prov)
+        session.flush()
+
+        results = validate_task(session, task_id, str(git_repo))
+        assert results["passed"] is True
+        session.refresh(task)
+        assert task.status == "validated"
+
+    def test_no_provenance_row_does_not_block_validation(self, session, git_repo):
+        """validate_task succeeds when no provenance row exists for the output."""
+        task_id = "TASK-V12"
+        task = make_task(session, task_id, status="completed")
+        task.outputs = ["util.py"]
+        session.flush()
+
+        _make_agent_branch(git_repo, task_id, extra_files={"util.py": "x = 1\n"})
+        _make_run(session, task_id)
+
+        # No ArtifactProvenance row — absent row means "agent", OK to validate.
+        results = validate_task(session, task_id, str(git_repo))
+        assert results["passed"] is True
+        session.refresh(task)
+        assert task.status == "validated"

@@ -20,7 +20,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .db import Run, Task
+from .db import ArtifactProvenance, Run, Task
 from .state_machine import TaskNotFoundError, transition
 
 
@@ -70,6 +70,23 @@ def validate_task(
     if task.status != "completed":
         raise ValidationError(
             f"Task {task_id!r} must be 'completed' to validate; current: {task.status!r}"
+        )
+
+    # Provenance gate: fast-fail if any declared output was written with external provenance.
+    external_outputs = []
+    for path in task.outputs or []:
+        row = session.execute(
+            select(ArtifactProvenance).where(
+                ArtifactProvenance.repo_path == repo_path,
+                ArtifactProvenance.file_path == path,
+            )
+        ).scalar_one_or_none()
+        if row is not None and row.provenance == "external":
+            external_outputs.append(path)
+    if external_outputs:
+        raise ValidationError(
+            f"Task {task_id!r} outputs contain external-provenance content "
+            f"and cannot be validated: {', '.join(external_outputs)}"
         )
 
     run_row = (
