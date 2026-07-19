@@ -17,7 +17,7 @@ Return ONLY a JSON array -- no explanation, no markdown code fences. Each elemen
   "owner":      "<agent-id>",
   "depends_on": ["<exact title of another task in this list>"],
   "inputs":     ["<repo-relative file path this task reads>"],
-  "outputs":    ["<repo-relative file path this task writes>"],
+  "outputs":    ["<repo-relative directory/ or file path this task writes — prefer a top-level directory like 'backend/' over listing individual files>"],
   "acceptance": ["<one acceptance criterion per string>"]
 }
 """

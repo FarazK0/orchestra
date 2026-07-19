@@ -286,15 +286,16 @@ def main(
 
         if task_discovered:
             log.info("TASK_DISCOVERED emitted — committing partial work and suspending")
-            partial_status = subprocess.check_output(
-                ["git", "status", "--porcelain"], cwd=repo_path, text=True
+            partial_tracked = subprocess.check_output(
+                ["git", "diff", "--name-only", "HEAD"], cwd=repo_path, text=True
+            )
+            partial_untracked = subprocess.check_output(
+                ["git", "ls-files", "--others", "--exclude-standard"], cwd=repo_path, text=True
             )
             partial = [
-                line[3:].strip()
-                for line in partial_status.splitlines()
-                if line.strip()
-                and "__pycache__" not in line
-                and not line[3:].strip().endswith(".pyc")
+                p.strip()
+                for p in partial_tracked.splitlines() + partial_untracked.splitlines()
+                if p.strip() and "__pycache__" not in p and not p.strip().endswith(".pyc")
             ]
             if partial:
                 try:
@@ -317,15 +318,24 @@ def main(
             raise typer.Exit(0)
 
         # ── 3. Collect changed files ───────────────────────────────────────
-        status_out = subprocess.check_output(
-            ["git", "status", "--porcelain"],
+        # Use ls-files to get individual paths: tracked modifications + untracked.
+        # git status --porcelain reports untracked directories as "?? dir/" which
+        # the gateway rejects — we need individual file paths for scope checks.
+        tracked_out = subprocess.check_output(
+            ["git", "diff", "--name-only", "HEAD"],
             cwd=repo_path,
             text=True,
         )
+        untracked_out = subprocess.check_output(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=repo_path,
+            text=True,
+        )
+        all_raw = tracked_out.splitlines() + untracked_out.splitlines()
         changed_paths = [
-            line[3:].strip()
-            for line in status_out.splitlines()
-            if line.strip() and "__pycache__" not in line and not line[3:].strip().endswith(".pyc")
+            p.strip()
+            for p in all_raw
+            if p.strip() and "__pycache__" not in p and not p.strip().endswith(".pyc")
         ]
 
         if not changed_paths:

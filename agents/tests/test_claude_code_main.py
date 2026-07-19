@@ -94,9 +94,14 @@ def test_file_write_audit_emitted_after_commit(tmp_path):
     call_log: list = []
     ctx = _make_context(tmp_path)
 
+    def _check_output_side_effect(cmd, **kwargs):
+        if "diff" in cmd:
+            return "src/app.py\ntests/test_app.py\n"
+        return ""  # ls-files: no untracked files
+
     with (
         patch("subprocess.run") as mock_run,
-        patch("subprocess.check_output", return_value=" M src/app.py\n M tests/test_app.py\n"),
+        patch("subprocess.check_output", side_effect=_check_output_side_effect),
         patch("httpx.Client", return_value=_mock_http_client(call_log)),
     ):
         mock_run.return_value = MagicMock(returncode=0, stdout="done", stderr="")

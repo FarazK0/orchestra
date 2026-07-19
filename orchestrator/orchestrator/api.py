@@ -18,6 +18,8 @@ import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+import dotenv
 from typing import Annotated, Any, Generator
 
 import redis.exceptions
@@ -51,6 +53,7 @@ _metrics_exposed = False
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    dotenv.load_dotenv()
     # expose() adds the /metrics route — guarded so it only runs once across
     # multiple TestClient contexts in the same test process.
     global _metrics_exposed

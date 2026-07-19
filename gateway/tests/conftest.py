@@ -11,8 +11,20 @@ import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+import pytest
+
 # Re-export session-scoped engine and per-test session from the orchestrator fixtures.
 from orchestrator.tests.conftest import engine, make_task, session  # noqa: F401
+
+
+@pytest.fixture(autouse=True)
+def _clear_capability_secret(monkeypatch):
+    """Remove CAPABILITY_SECRET so gateway tests don't require JWT tokens.
+
+    Scope tests that need the secret add it back themselves via patch.dict.
+    """
+    monkeypatch.delenv("CAPABILITY_SECRET", raising=False)
+
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
