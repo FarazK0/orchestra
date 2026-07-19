@@ -237,6 +237,56 @@ def test_discovery_rejected_on_unknown_dependency(session):
 
 
 # ---------------------------------------------------------------------------
+# Rejection: outputs outside parent write_scope
+# ---------------------------------------------------------------------------
+
+
+def test_discovery_rejected_when_outputs_outside_parent_scope(session):
+    now = datetime.now(timezone.utc)
+    parent = Task(
+        id="TASK-SS1",
+        schema_version=1,
+        title="Scoped parent",
+        owner="backend-agent",
+        status="running",
+        depends_on=[],
+        inputs=[],
+        outputs=["app/"],   # parent can only write to app/
+        acceptance=[],
+        risk_tier=1,
+        budget=_DEFAULT_BUDGET,
+        spawn_depth=0,
+        blocked_by=[],
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(parent)
+    session.flush()
+
+    # Child claims to write to 'outside/' which is not within 'app/'
+    ev = _make_discovery_event(
+        session, "TASK-SS1", title="Write outside scope", outputs=["outside/secret.py"]
+    )
+    scheduler = Scheduler()
+    result = scheduler.handle_task_discovered(session, ev)
+
+    assert result is None
+
+    rejection = (
+        session.query(Event)
+        .filter(Event.task_id == "TASK-SS1", Event.event_type == "TASK_DISCOVERY_REJECTED")
+        .first()
+    )
+    assert rejection is not None
+    assert rejection.payload["reason"] == "outputs_outside_parent_scope"
+
+    # Parent stays running
+    session.expire(parent)
+    parent = session.get(Task, "TASK-SS1")
+    assert parent.status == "running"
+
+
+# ---------------------------------------------------------------------------
 # on_child_terminal: single child → parent resumed
 # ---------------------------------------------------------------------------
 

@@ -25,8 +25,9 @@ from pathlib import Path
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from .dag import TERMINAL_STATUSES
 from .db import AgentMemory, ArtifactProvenance, Run, Task
-from .token import mint_token
+from .token import CapabilityError, mint_child_capability_token, mint_token
 
 log = logging.getLogger(__name__)
 
@@ -217,6 +218,24 @@ def build_context_package(
 
     branch = f"agent/backend/{task_id}"
 
+    # v0.3 adaptive lifecycle: resumption context
+    is_resumption = task.checkpoint is not None
+    child_outputs: list[dict] = []
+    if is_resumption:
+        children = session.execute(
+            select(Task).where(Task.parent_task_id == task_id)
+        ).scalars().all()
+        child_outputs = [
+            {
+                "task_id": c.id,
+                "title": c.title,
+                "outputs": c.outputs,
+                "status": c.status,
+            }
+            for c in children
+            if c.status in TERMINAL_STATUSES
+        ]
+
     pkg: dict = {
         "schema_version": 1,
         "task_id": task_id,
@@ -242,6 +261,10 @@ def build_context_package(
             "write_scope": task.outputs,
             "acceptance_criteria": task.acceptance,
         },
+        # v0.3 resumption fields (always present so agents can check without KeyError)
+        "is_resumption": is_resumption,
+        "checkpoint": task.checkpoint,
+        "child_outputs": child_outputs,
     }
     if agent_memory is not None:
         pkg["agent_memory"] = agent_memory
@@ -273,23 +296,60 @@ def create_run(
     Raises:
         TaskNotFoundError: task_id is not in the tasks table.
     """
+    from sqlalchemy import func
+
     run_id = uuid.uuid4()
     package = build_context_package(session, task_id, repo_path)
     package["run_id"] = str(run_id)
 
-    # Derive branch from agent type; append retry suffix for retries.
+    # Derive branch from agent type.
+    # Resumed tasks get a -resume-N suffix so each resumption lands on a fresh branch;
+    # retried tasks keep the existing -retry-N convention.
     agent_type = agent_id.removesuffix("-agent")
-    suffix = f"-retry-{retry_count}" if retry_count > 0 else ""
+    if package.get("is_resumption"):
+        run_count = (
+            session.execute(select(func.count(Run.run_id)).where(Run.task_id == task_id)).scalar()
+            or 0
+        )
+        suffix = f"-resume-{run_count}"
+    elif retry_count > 0:
+        suffix = f"-retry-{retry_count}"
+    else:
+        suffix = ""
     branch = f"agent/{agent_type}/{task_id}{suffix}"
     package["agent_instructions"]["branch"] = branch
     package["agent_instructions"]["agent_id"] = agent_id
-    package["capability_token"] = mint_token(
-        str(run_id),
-        task_id,
-        agent_id,
-        package["agent_instructions"]["write_scope"],
-        package["task"]["budget"],
-    )
+
+    # Capability token: child tasks get a narrowed scope = child.outputs ∩ parent.outputs;
+    # root tasks get a token covering their full outputs list.
+    write_scope = package["agent_instructions"]["write_scope"]
+    task_orm = session.get(Task, task_id)  # identity-map hit — no extra query
+    parent_task_id = task_orm.parent_task_id if task_orm else None
+    if parent_task_id:
+        parent_task = session.get(Task, parent_task_id)
+        parent_write_scope = parent_task.outputs if parent_task else []
+        try:
+            package["capability_token"] = mint_child_capability_token(
+                str(run_id),
+                task_id,
+                agent_id,
+                write_scope,
+                parent_write_scope,
+                package["task"]["budget"],
+            )
+        except CapabilityError:
+            log.warning(
+                "Child task %s outputs outside parent %s scope; falling back to full scope",
+                task_id,
+                parent_task_id,
+            )
+            package["capability_token"] = mint_token(
+                str(run_id), task_id, agent_id, write_scope, package["task"]["budget"]
+            )
+    else:
+        package["capability_token"] = mint_token(
+            str(run_id), task_id, agent_id, write_scope, package["task"]["budget"]
+        )
 
     store_dir.mkdir(parents=True, exist_ok=True)
     package_path = store_dir / f"{run_id}.json"

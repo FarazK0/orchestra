@@ -227,6 +227,70 @@ def test_create_run_raises_for_unknown_task(session, tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_create_run_child_token_narrowed_to_parent_scope(session, tmp_path):
+    """Child task capability token write_scope must be ⊆ parent write_scope."""
+    import os
+    from unittest.mock import patch
+
+    import jwt
+    from datetime import datetime, timezone
+
+    from orchestrator.orchestrator.db import Task
+
+    _SECRET = "test-narrow-secret-stage4"
+    now = datetime.now(timezone.utc)
+
+    parent = Task(
+        id="TASK-850",
+        schema_version=1,
+        title="Parent task",
+        owner="backend-agent",
+        status="running",
+        depends_on=[],
+        inputs=[],
+        outputs=["app/"],
+        acceptance=[],
+        risk_tier=1,
+        budget={"tokens": 100_000, "wall_clock_min": 30, "retries": 2},
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(parent)
+
+    child = Task(
+        id="TASK-851",
+        schema_version=1,
+        title="Child task",
+        owner="backend-agent",
+        status="assigned",
+        depends_on=[],
+        inputs=[],
+        outputs=["app/auth.py", "outside/secret.py"],
+        acceptance=[],
+        risk_tier=1,
+        budget={"tokens": 100_000, "wall_clock_min": 30, "retries": 2},
+        parent_task_id="TASK-850",
+        spawn_depth=1,
+        blocked_by=[],
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(child)
+    session.flush()
+
+    with patch.dict(os.environ, {"CAPABILITY_SECRET": _SECRET}):
+        run = create_run(session, "TASK-851", "backend-agent", tmp_path, tmp_path / "store")
+
+    import json
+    pkg = json.loads((tmp_path / "store" / f"{run.run_id}.json").read_text())
+    token = pkg["capability_token"]
+    assert token != ""
+
+    claims = jwt.decode(token, _SECRET, algorithms=["HS256"])
+    # Token write_scope is narrowed: only "app/auth.py" survives, "outside/secret.py" is dropped
+    assert claims["write_scope"] == ["app/auth.py"]
+
+
 def test_build_resumption_fields_on_first_run(session, tmp_path):
     make_task(session, "TASK-810", status="assigned")
     session.flush()

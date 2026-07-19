@@ -128,6 +128,23 @@ class Scheduler:
                 self._emit_rejection(session, parent_task_id, "circular_dependency", reason)
                 return None
 
+        # 5b. Capability inheritance gate: child outputs must be within parent write_scope
+        if outputs and parent.outputs:
+            from .token import _intersect_scopes
+
+            allowed = _intersect_scopes(outputs, parent.outputs)
+            if len(allowed) < len(outputs):
+                out_of_scope = [o for o in outputs if o not in allowed]
+                log.warning(
+                    "TASK_DISCOVERED: child outputs %s outside parent scope %s; rejecting",
+                    out_of_scope,
+                    parent.outputs,
+                )
+                self._emit_rejection(
+                    session, parent_task_id, "outputs_outside_parent_scope", reason
+                )
+                return None
+
         # 6. Create child task
         child_id = _next_task_id(session)
         now = datetime.now(timezone.utc)
