@@ -172,3 +172,18 @@ def test_get_running_conflicts_no_outputs(session):
     # task.outputs == [] by default
     session.flush()
     assert get_running_conflicts(task, session) == []
+
+
+# ---------------------------------------------------------------------------
+# v0.3: blocked status does not satisfy dependencies
+# ---------------------------------------------------------------------------
+
+
+def test_blocked_dep_does_not_satisfy_readiness(session):
+    """`blocked` is not a terminal status — a blocked dep keeps dependents unready."""
+    dep = make_task(session, "TASK-DB1", status="blocked")
+    task = make_task(session, "TASK-DB2", status="created")
+    task.depends_on = [dep.id]
+    session.flush()
+    assert task_is_ready(task, session) is False
+    assert "blocked" not in TERMINAL_STATUSES

@@ -8,6 +8,12 @@ Seven tables:
   stream_deliveries   - dedup table for Redis Streams exactly-once processing
   agent_memories      - persistent memory for specialist agents (identity, episodes, skills)
   artifact_provenance - per-file trust level (human / agent / external)
+
+v0.3 adaptive lifecycle columns on tasks:
+  parent_task_id  - FK to tasks(id); null for planner-originated tasks
+  spawn_depth     - recursion depth of discovered tasks (root = 0)
+  blocked_by      - JSONB list of child task IDs currently blocking this task
+  checkpoint      - JSONB agent state snapshot stored at suspension time
 """
 
 from __future__ import annotations
@@ -49,6 +55,13 @@ class Task(Base):
     risk_tier: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     budget: Mapped[dict] = mapped_column(JSONB, nullable=False)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # v0.3 adaptive lifecycle
+    parent_task_id: Mapped[str | None] = mapped_column(
+        String, ForeignKey("tasks.id"), nullable=True
+    )
+    spawn_depth: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    blocked_by: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    checkpoint: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

@@ -29,6 +29,7 @@ class TaskStatus(str, Enum):
     created = "created"
     assigned = "assigned"
     running = "running"
+    blocked = "blocked"
     completed = "completed"
     validated = "validated"
     merged = "merged"
@@ -58,6 +59,11 @@ class Task(BaseModel):
     acceptance: list[str] = Field(default_factory=list)
     risk_tier: Annotated[int, Field(ge=0, le=2)]
     budget: TaskBudget
+    # v0.3 adaptive lifecycle
+    parent_task_id: str | None = None
+    spawn_depth: int = 0
+    blocked_by: list[str] = Field(default_factory=list)
+    checkpoint: dict | None = None
 
 
 # ---------------------------------------------------------------------------

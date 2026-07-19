@@ -130,6 +130,9 @@ class TaskCreate(BaseModel):
     budget: TaskBudget = Field(
         default_factory=lambda: TaskBudget(tokens=100_000, wall_clock_min=30, retries=2)
     )
+    # v0.3 adaptive lifecycle
+    parent_task_id: str | None = None
+    spawn_depth: int = 0
 
 
 class TransitionRequest(BaseModel):
@@ -237,6 +240,8 @@ def create_task(body: TaskCreate, session: SessionDep) -> TaskSchema:
         acceptance=body.acceptance,
         risk_tier=effective_tier,
         budget=body.budget.model_dump(),
+        parent_task_id=body.parent_task_id,
+        spawn_depth=body.spawn_depth,
         created_at=now,
         updated_at=now,
     )
@@ -299,15 +304,16 @@ def transition_task(
 
 
 @app.get("/tasks/{task_id}/events", response_model=list[EventSchema])
-def list_task_events(task_id: str, session: SessionDep) -> list[EventSchema]:
+def list_task_events(
+    task_id: str,
+    session: SessionDep,
+    event_type: str | None = Query(default=None),
+) -> list[EventSchema]:
     _task_or_404(session, task_id)
-    rows = (
-        session.execute(
-            select(EventORM).where(EventORM.task_id == task_id).order_by(EventORM.emitted_at)
-        )
-        .scalars()
-        .all()
-    )
+    q = select(EventORM).where(EventORM.task_id == task_id).order_by(EventORM.emitted_at)
+    if event_type:
+        q = q.where(EventORM.event_type == event_type)
+    rows = session.execute(q).scalars().all()
     return [EventSchema.model_validate(e) for e in rows]
 
 
