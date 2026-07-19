@@ -1,0 +1,21 @@
+version: 1
+# Glob-based risk-tier assignment rules.
+# Rules are evaluated per output path; the task's overall tier = max(tier for each output).
+# First matching rule wins for each path; unmatched paths use default_tier.
+#
+# IMPORTANT: This file is Tier 2 by definition — any change to it requires
+# --tier-2-override approval (enforced by the permissions/** rule below).
+rules:
+  - pattern: "permissions/**"
+    tier: 2
+  - pattern: "infra/migrations/**"
+    tier: 2
+  - pattern: "schemas/**"
+    tier: 2
+  - pattern: "docs/adr/**"
+    tier: 0
+  - pattern: "docs/**"
+    tier: 0
+  - pattern: "tests/**"
+    tier: 0
+default_tier: 1

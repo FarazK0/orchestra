@@ -57,7 +57,12 @@ def _handle_error(resp: httpx.Response) -> None:
 def create_task(
     title: str = typer.Argument(..., help="Short task title."),
     owner: str = typer.Option("human", help="Agent ID or 'human' that owns the task."),
-    risk_tier: int = typer.Option(1, min=0, max=2, help="Risk tier: 0=auto, 1=batch, 2=blocking."),
+    risk_tier: Optional[int] = typer.Option(
+        None,
+        min=0,
+        max=2,
+        help="Risk tier: 0=auto, 1=batch, 2=blocking. Default: auto-assigned from policy.",
+    ),
     accept: Optional[list[str]] = typer.Option(
         None, "--accept", "-a", help="Acceptance criterion (repeatable)."
     ),
@@ -143,7 +148,8 @@ def list_tasks(
     typer.echo(fmt.format("ID", "STATUS", "OWNER", "TITLE"))
     typer.echo("-" * (col_id + col_st + col_ow + len("TITLE") + 6))
     for t in tasks:
-        typer.echo(fmt.format(t["id"], t["status"], t["owner"], t["title"]))
+        tier_badge = " [T2]" if t.get("risk_tier") == 2 else ""
+        typer.echo(fmt.format(t["id"], t["status"], t["owner"], t["title"] + tier_badge))
 
 
 # ---------------------------------------------------------------------------
@@ -161,12 +167,17 @@ _APPROVAL_GATES: dict[str, str] = {
 def approve(
     task_id: str = typer.Argument(..., help="Task ID to approve, e.g. TASK-001."),
     actor: str = typer.Option("human", help="Actor name recorded in the audit log."),
+    tier_2_override: bool = typer.Option(
+        False, "--tier-2-override", help="Required to merge a Tier 2 (blocking) task."
+    ),
 ) -> None:
     """Approve a task at the current human gate.
 
     \b
     created   → assigned  (kick off agent execution)
     validated → merged    (approve reviewed branch for merge)
+
+    Tier 2 tasks require --tier-2-override to proceed to 'merged'.
     """
     with _client() as c:
         resp = c.get(f"/tasks/{task_id}")
@@ -185,10 +196,23 @@ def approve(
 
     new_status = _APPROVAL_GATES[current]
 
+    # Tier 2 guard: require explicit flag before sending the transition request.
+    if new_status == "merged" and task.get("risk_tier") == 2 and not tier_2_override:
+        typer.echo(
+            f"Error: {task_id} ({task['title']!r}) is Tier 2 (blocking approval).\n"
+            "Review the diff carefully, then re-run with --tier-2-override to confirm.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    details: dict = {}
+    if new_status == "merged" and tier_2_override:
+        details["tier2_override"] = True
+
     with _client() as c:
         resp = c.post(
             f"/tasks/{task_id}/transition",
-            json={"new_status": new_status, "actor": actor},
+            json={"new_status": new_status, "actor": actor, "details": details},
         )
     _handle_error(resp)
 
@@ -246,6 +270,9 @@ def merge(
         "--gateway-url",
         help="Gateway base URL. Defaults to $GATEWAY_URL or http://localhost:8081.",
     ),
+    tier_2_override: bool = typer.Option(
+        False, "--tier-2-override", help="Required to merge a Tier 2 (blocking) task."
+    ),
 ) -> None:
     """Merge a validated task's agent branch into main and close the task.
 
@@ -255,6 +282,8 @@ def merge(
       1. git merge agent/<type>/{task_id} → main  (via gateway, audited)
       2. validated → merged                        (orchestrator transition)
       3. merged   → closed                         (orchestrator transition)
+
+    Tier 2 tasks require --tier-2-override to proceed.
     """
     gw = gateway_url or os.getenv("GATEWAY_URL", "http://localhost:8081")
 
@@ -266,6 +295,15 @@ def merge(
     if task["status"] != "validated":
         typer.echo(
             f"Error: {task_id} is in {task['status']!r} — must be 'validated' to merge.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Tier 2 guard.
+    if task.get("risk_tier") == 2 and not tier_2_override:
+        typer.echo(
+            f"Error: {task_id} ({task['title']!r}) is Tier 2 (blocking approval).\n"
+            "Review the diff carefully, then re-run with --tier-2-override to confirm.",
             err=True,
         )
         raise typer.Exit(1)
@@ -289,10 +327,18 @@ def merge(
     sha = resp.json().get("sha", "?")
 
     # 3. Transition validated → merged.
+    merge_details: dict = {}
+    if tier_2_override:
+        merge_details["tier2_override"] = True
     with _client() as c:
         resp = c.post(
             f"/tasks/{task_id}/transition",
-            json={"new_status": "merged", "actor": actor, "payload": {"sha": sha}},
+            json={
+                "new_status": "merged",
+                "actor": actor,
+                "payload": {"sha": sha},
+                "details": merge_details,
+            },
         )
     _handle_error(resp)
 
@@ -477,7 +523,7 @@ def _cancel_task(task_id: str, reason: str = "human cancelled") -> bool:
     return True
 
 
-def _do_merge(task: dict, repo: str, gw: str) -> bool:
+def _do_merge(task: dict, repo: str, gw: str, tier2_override: bool = False) -> bool:
     task_id = task["id"]
     agent_type = task["owner"].removesuffix("-agent")
     branch = f"agent/{agent_type}/{task_id}"
@@ -507,8 +553,14 @@ def _do_merge(task: dict, repo: str, gw: str) -> bool:
         return False
     sha = resp.json().get("sha", "?")
 
+    merge_details: dict = {}
+    if tier2_override:
+        merge_details["tier2_override"] = True
     with _client() as c:
-        r = c.post(f"/tasks/{task_id}/transition", json={"new_status": "merged", "actor": "human"})
+        r = c.post(
+            f"/tasks/{task_id}/transition",
+            json={"new_status": "merged", "actor": "human", "details": merge_details},
+        )
     if r.is_error:
         typer.echo(f"  {_r('Transition error')}: {r.text}", err=True)
         return False
@@ -561,19 +613,34 @@ def _handle_task(task: dict, repo: str, gw: str) -> None:
         status = task["status"]
 
     if status == "validated":
-        typer.echo(f"\n  Status: {_g('validated')}  Awaiting your approval.")
-        choice = (
-            typer.prompt(
-                f"\n  {_b('[a]')}pprove + merge   {_b('[s]')}kip",
-                default="a",
+        is_tier2 = task.get("risk_tier") == 2
+        if is_tier2:
+            typer.echo(
+                f"\n  Status: {_g('validated')}  {_r('[TIER 2 — BLOCKING APPROVAL]')}\n"
+                f"  This task touches high-risk files. Review the diff before approving."
             )
-            .strip()
-            .lower()
-        )
-        if choice.startswith("a"):
-            _do_merge(task, repo, gw)
+            confirm_id = typer.prompt(
+                "\n  Type the task ID to approve, or press Enter to skip",
+                default="",
+            ).strip()
+            if confirm_id == task["id"]:
+                _do_merge(task, repo, gw, tier2_override=True)
+            else:
+                typer.echo("  Skipped — task stays validated.")
         else:
-            typer.echo("  Skipped — task stays validated.")
+            typer.echo(f"\n  Status: {_g('validated')}  Awaiting your approval.")
+            choice = (
+                typer.prompt(
+                    f"\n  {_b('[a]')}pprove + merge   {_b('[s]')}kip",
+                    default="a",
+                )
+                .strip()
+                .lower()
+            )
+            if choice.startswith("a"):
+                _do_merge(task, repo, gw)
+            else:
+                typer.echo("  Skipped — task stays validated.")
 
     elif status == "failed":
         typer.echo(f"\n  {_r('Failed.')} The dispatcher will retry or escalate.")

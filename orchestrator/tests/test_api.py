@@ -387,3 +387,98 @@ def test_start_run_task_not_found(client, tmp_path):
         json={"agent_id": "backend-agent", "repo_path": str(tmp_path)},
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Policy-based tier assignment
+# ---------------------------------------------------------------------------
+
+
+def test_create_task_tier_auto_assigned_from_policy(client):
+    """Output path matching infra/migrations/** → risk_tier raised to 2 by policy."""
+    resp = client.post(
+        "/tasks",
+        json={
+            "title": "Add migration",
+            "outputs": ["infra/migrations/008_new_column.py"],
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["risk_tier"] == 2
+
+
+def test_create_task_explicit_tier_not_lowered_by_policy(client):
+    """Explicit risk_tier=2 is preserved even if policy would assign tier 0."""
+    resp = client.post(
+        "/tasks",
+        json={
+            "title": "Sensitive docs task",
+            "risk_tier": 2,
+            "outputs": ["docs/adr/ADR-010.md"],
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["risk_tier"] == 2
+
+
+def test_create_task_docs_output_gets_tier0(client):
+    """docs/** matches the tier-0 rule; default tier 1 is lowered to 0 by policy."""
+    resp = client.post(
+        "/tasks",
+        json={
+            "title": "Update docs",
+            "outputs": ["docs/design/spec.md"],
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["risk_tier"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 hard gate (state machine)
+# ---------------------------------------------------------------------------
+
+
+def test_tier2_transition_blocked_without_override(client, session):
+    """validated → merged on a Tier 2 task is rejected without tier2_override."""
+    task = make_task(session, "TASK-801", status="validated")
+    task.risk_tier = 2
+    session.flush()
+
+    resp = client.post(
+        "/tasks/TASK-801/transition",
+        json={"new_status": "merged", "actor": "human"},
+    )
+    assert resp.status_code == 409
+    assert "Tier 2" in resp.json()["detail"]
+
+
+def test_tier2_transition_allowed_with_override(client, session):
+    """validated → merged on a Tier 2 task succeeds when tier2_override=True."""
+    task = make_task(session, "TASK-802", status="validated")
+    task.risk_tier = 2
+    session.flush()
+
+    resp = client.post(
+        "/tasks/TASK-802/transition",
+        json={
+            "new_status": "merged",
+            "actor": "human",
+            "details": {"tier2_override": True},
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "merged"
+
+
+def test_tier1_transition_not_blocked(client, session):
+    """validated → merged on a Tier 1 task succeeds without any override."""
+    make_task(session, "TASK-803", status="validated")
+    session.flush()
+
+    resp = client.post(
+        "/tasks/TASK-803/transition",
+        json={"new_status": "merged", "actor": "human"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "merged"

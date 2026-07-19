@@ -39,6 +39,7 @@ from .db import Run as RunORM
 from .db import Task as TaskORM
 from .db import get_engine, get_session_factory
 from .metrics import human_queue_latency_seconds, tasks_total
+from .policy import get_policy
 from .state_machine import InvalidTransitionError, TaskNotFoundError, transition
 from .streams import StreamPublisher
 from .telemetry import setup_tracing
@@ -57,6 +58,7 @@ async def _lifespan(app: FastAPI):
         setup_tracing(app, "orchestrator")
         _instrumentator.expose(app)
         _metrics_exposed = True
+    get_policy()  # warm the cache; logs a warning if file absent
     yield
 
 
@@ -124,7 +126,7 @@ class TaskCreate(BaseModel):
     inputs: list[str] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)
     acceptance: list[str] = Field(default_factory=list)
-    risk_tier: Annotated[int, Field(ge=0, le=2)] = 1
+    risk_tier: Annotated[int | None, Field(ge=0, le=2)] = None
     budget: TaskBudget = Field(
         default_factory=lambda: TaskBudget(tokens=100_000, wall_clock_min=30, retries=2)
     )
@@ -218,6 +220,11 @@ def health() -> dict[str, str]:
 @app.post("/tasks", response_model=TaskSchema, status_code=201)
 def create_task(body: TaskCreate, session: SessionDep) -> TaskSchema:
     now = datetime.now(timezone.utc)
+    # Policy determines the tier from output paths (default_tier=1 when no rule matches).
+    # An explicit risk_tier in the request acts as a floor — it can raise above policy but
+    # cannot lower below it (prevents accidentally downgrading a migration to tier 0).
+    policy_tier = get_policy().tier_for_outputs(body.outputs)
+    effective_tier = max(body.risk_tier, policy_tier) if body.risk_tier is not None else policy_tier
     task = TaskORM(
         id=_next_task_id(session),
         schema_version=1,
@@ -228,7 +235,7 @@ def create_task(body: TaskCreate, session: SessionDep) -> TaskSchema:
         inputs=body.inputs,
         outputs=body.outputs,
         acceptance=body.acceptance,
-        risk_tier=body.risk_tier,
+        risk_tier=effective_tier,
         budget=body.budget.model_dump(),
         created_at=now,
         updated_at=now,

@@ -100,6 +100,13 @@ def transition(
             f"No transition from {task.status!r} to {new_status!r} for task {task_id!r}"
         )
 
+    # Tier 2 hard gate: validated → merged requires explicit human override.
+    if new_status == "merged" and task.risk_tier == 2 and not details.get("tier2_override"):
+        raise InvalidTransitionError(
+            f"Task {task_id!r} is Tier 2 (blocking approval). "
+            "Pass details.tier2_override=True to confirm."
+        )
+
     event_type = TRANSITIONS[edge]
 
     # 1. Update task status.

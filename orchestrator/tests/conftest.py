@@ -110,6 +110,15 @@ def session_factory(engine):
 _DEFAULT_BUDGET = {"tokens": 100_000, "wall_clock_min": 30, "retries": 2}
 
 
+@pytest.fixture(autouse=True)
+def _reset_policy_singleton():
+    """Reset the policy singleton before each test to avoid cross-test contamination."""
+    from orchestrator.orchestrator.policy import reload_policy
+
+    reload_policy()
+    yield
+
+
 def make_task(
     session: Session,
     task_id: str,

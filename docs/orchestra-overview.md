@@ -344,10 +344,17 @@ Post-phase additions: `orchctl cancel`, `cancelled` state, sandbox reset tooling
   outcomes, human review queue latency. OTel FastAPI auto-instrumentation exports to Jaeger
   all-in-one when `OTLP_ENDPOINT` is set (no-op otherwise). Grafana pre-provisioned with
   Prometheus datasource and seven-panel Orchestra dashboard. See ADR-007.
+- **Policy file + Tier 2 hard gate (Step 28):** `permissions/policy.yaml` maps output
+  path globs to risk tiers; task creation auto-assigns tier (max across all output paths,
+  caller can raise but not lower). `validated → merged` on a Tier 2 task is rejected by
+  the state machine unless `details.tier2_override=True`. CLI `approve`/`merge` require
+  `--tier-2-override`; `review` loop requires typing the task ID. `orchctl list` shows
+  `[T2]` badge. See ADR-008.
 
 **Next in queue:**
+- **Batch review queue UI (Step 29):** minimal web UI (HTMX + Jinja2 served from FastAPI)
+  showing validated tasks and merge actions.
 - **Per-write audit for claude-code-agent:** gateway intercept or post-commit diff audit.
-- **Policy file for risk tiers:** configurable Tier 1/2 gates per project.
 - **Validator provenance check:** refuse to validate a task whose outputs carry
   `provenance=external`.
 
@@ -369,6 +376,7 @@ spawning with inherited-and-narrowed capabilities, load testing, v1.0 doc.
 | ADR-005 | Gateway as Phase 1 sandbox (subprocess on host; Docker isolation deferred) |
 | ADR-006 | Capability tokens: HS256 JWT for gateway authorization, write-scope enforcement |
 | ADR-007 | Observability: pull-based Prometheus, Jaeger all-in-one, OTel auto-instrumentation |
+| ADR-008 | Risk-tier policy file: glob rules, max-wins, Tier 2 hard gate via details flag |
 
 ---
 

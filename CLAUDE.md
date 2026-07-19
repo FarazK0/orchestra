@@ -54,6 +54,9 @@ Provenance metadata (Step 26 done): `artifact_provenance` table; external conten
 in `<external-content>` delimiters in agent prompts.
 Observability (Step 27 done): Prometheus + OTel traces on both services; Grafana dashboard;
 Jaeger all-in-one; see ADR-007.
+Policy file + Tier 2 hard gate (Step 28 done): `permissions/policy.yaml` auto-assigns task
+tier from output path globs; `validated → merged` blocked for Tier 2 without
+`details.tier2_override=True`; CLI `--tier-2-override` flag; see ADR-008.
 
 Phase gates and weekly breakdown are in the design doc, Part 5.
 
