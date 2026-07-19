@@ -141,6 +141,21 @@ source "$ROOT/.env"
 set +a
 echo "  .env loaded"
 
+# Auto-generate CAPABILITY_SECRET if absent or still the placeholder.
+_cap_secret="${CAPABILITY_SECRET:-}"
+if [ -z "$_cap_secret" ] || [[ "$_cap_secret" == change-me* ]]; then
+  _new_secret=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+  if grep -q "^CAPABILITY_SECRET=" "$ROOT/.env"; then
+    sed -i "s|^CAPABILITY_SECRET=.*|CAPABILITY_SECRET=${_new_secret}|" "$ROOT/.env"
+  else
+    echo "CAPABILITY_SECRET=${_new_secret}" >> "$ROOT/.env"
+  fi
+  set -a; source "$ROOT/.env"; set +a
+  echo "  CAPABILITY_SECRET: $(_green 'generated')  $(_dim '(capability tokens enabled)')"
+else
+  echo "  CAPABILITY_SECRET: $(_green 'already set')"
+fi
+
 # ── 3a. Agent type ────────────────────────────────────────────────────────────
 AGENT_TYPE="claude-code"  # default; overridden below if Python loops chosen
 
