@@ -276,7 +276,11 @@ class Dispatcher:
 
     def _launch_agent(self, run: Run) -> None:
         agent_type = os.getenv("AGENT_TYPE", "claude-code")
-        if agent_type != "python" and run.agent_id in _AGENT_MODULES and run.agent_id != "claude-code-agent":
+        if (
+            agent_type != "python"
+            and run.agent_id in _AGENT_MODULES
+            and run.agent_id != "claude-code-agent"
+        ):
             module = "agents.claude_code.main"
         else:
             module = _AGENT_MODULES.get(run.agent_id, "agents.backend.main")
@@ -298,7 +302,9 @@ class Dispatcher:
             stdout=log_file,
             stderr=subprocess.STDOUT,
         )
-        log.info("Launched %s for run %s (task %s) log=%s", module, run.run_id, run.task_id, log_path)
+        log.info(
+            "Launched %s for run %s (task %s) log=%s", module, run.run_id, run.task_id, log_path
+        )
 
     # ------------------------------------------------------------------
     # Stale-task recovery

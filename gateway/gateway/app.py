@@ -38,7 +38,14 @@ from orchestrator.orchestrator.db import Task as TaskORM
 from orchestrator.orchestrator.db import get_engine, get_session_factory
 
 from .audit import write_gateway_audit
-from .permissions import PermissionDeniedError, check_active_run, check_validated_task, safe_path
+from .permissions import (
+    PermissionDeniedError,
+    check_active_run,
+    check_validated_task,
+    check_write_scope,
+    safe_path,
+    verify_capability_header,
+)
 
 app = FastAPI(title="Orchestra Tool Gateway", version="0.1.0")
 
@@ -232,9 +239,14 @@ def health() -> dict[str, str]:
 
 
 @app.post("/read_artifact", response_model=ArtifactReadResponse)
-def read_artifact(body: ArtifactRead, session: SessionDep) -> ArtifactReadResponse:
+def read_artifact(
+    body: ArtifactRead,
+    session: SessionDep,
+    authorization: str | None = Header(default=None),
+) -> ArtifactReadResponse:
     """Read a file from the managed repo. Audited."""
     try:
+        verify_capability_header(authorization)
         _run, task = check_active_run(session, body.agent_id, body.task_id)
     except PermissionDeniedError as exc:
         raise _deny(exc)
@@ -267,10 +279,16 @@ def read_artifact(body: ArtifactRead, session: SessionDep) -> ArtifactReadRespon
 
 
 @app.post("/write_artifact", response_model=ArtifactWriteResponse)
-def write_artifact(body: ArtifactWrite, session: SessionDep) -> ArtifactWriteResponse:
+def write_artifact(
+    body: ArtifactWrite,
+    session: SessionDep,
+    authorization: str | None = Header(default=None),
+) -> ArtifactWriteResponse:
     """Write (create or overwrite) a file in the managed repo. Audited."""
     try:
+        claims = verify_capability_header(authorization)
         check_active_run(session, body.agent_id, body.task_id)
+        check_write_scope(claims, body.path)
     except PermissionDeniedError as exc:
         raise _deny(exc)
 
@@ -295,13 +313,18 @@ def write_artifact(body: ArtifactWrite, session: SessionDep) -> ArtifactWriteRes
 
 
 @app.post("/run_command", response_model=CommandRunResponse)
-def run_command(body: CommandRun, session: SessionDep) -> CommandRunResponse:
+def run_command(
+    body: CommandRun,
+    session: SessionDep,
+    authorization: str | None = Header(default=None),
+) -> CommandRunResponse:
     """Run a command in the managed repo directory. Audited.
 
     Phase 1: subprocess with timeout. Docker sandboxing (no-network) is
     deferred to Phase 3; see ADR-005.
     """
     try:
+        verify_capability_header(authorization)
         check_active_run(session, body.agent_id, body.task_id)
     except PermissionDeniedError as exc:
         raise _deny(exc)
@@ -345,9 +368,14 @@ def run_command(body: CommandRun, session: SessionDep) -> CommandRunResponse:
 
 
 @app.post("/emit_event", response_model=EventEmitResponse)
-def emit_event(body: EventEmit, session: SessionDep) -> EventEmitResponse:
+def emit_event(
+    body: EventEmit,
+    session: SessionDep,
+    authorization: str | None = Header(default=None),
+) -> EventEmitResponse:
     """Write an event to the control plane on behalf of the agent. Audited."""
     try:
+        verify_capability_header(authorization)
         check_active_run(session, body.agent_id, body.task_id)
     except PermissionDeniedError as exc:
         raise _deny(exc)
@@ -377,9 +405,14 @@ def emit_event(body: EventEmit, session: SessionDep) -> EventEmitResponse:
 
 
 @app.post("/git/branch", response_model=GitBranchResponse)
-def git_branch(body: GitBranch, session: SessionDep) -> GitBranchResponse:
+def git_branch(
+    body: GitBranch,
+    session: SessionDep,
+    authorization: str | None = Header(default=None),
+) -> GitBranchResponse:
     """Create or switch to a branch in the managed repo. Audited."""
     try:
+        verify_capability_header(authorization)
         check_active_run(session, body.agent_id, body.task_id)
     except PermissionDeniedError as exc:
         raise _deny(exc)
@@ -409,9 +442,14 @@ def git_branch(body: GitBranch, session: SessionDep) -> GitBranchResponse:
 
 
 @app.post("/git/commit", response_model=GitCommitResponse)
-def git_commit(body: GitCommit, session: SessionDep) -> GitCommitResponse:
+def git_commit(
+    body: GitCommit,
+    session: SessionDep,
+    authorization: str | None = Header(default=None),
+) -> GitCommitResponse:
     """Stage specified paths and commit in the managed repo. Audited."""
     try:
+        verify_capability_header(authorization)
         check_active_run(session, body.agent_id, body.task_id)
     except PermissionDeniedError as exc:
         raise _deny(exc)
@@ -505,6 +543,7 @@ def memory_upsert(
     body: MemoryUpsert,
     session: SessionDep,
     x_platform_actor: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> MemoryUpsertResponse:
     """Write or update an agent memory entry. Audited.
 
@@ -526,9 +565,13 @@ def memory_upsert(
             raise HTTPException(status_code=400, detail="agent_id required for platform writes")
         resolved_agent_id = body.agent_id
     else:
-        # Agent writes: derive agent_id from the running task.
+        # Agent writes: require capability token + derive agent_id from the running task.
         if not body.task_id:
             raise HTTPException(status_code=400, detail="task_id required")
+        try:
+            verify_capability_header(authorization)
+        except PermissionDeniedError as exc:
+            raise _deny(exc)
         try:
             _run, task = check_active_run(session, body.agent_id or "", body.task_id)
         except PermissionDeniedError:
@@ -624,12 +667,20 @@ def memory_upsert(
 
 
 @app.post("/memory/search", response_model=MemorySearchResponse)
-def memory_search(body: MemorySearch, session: SessionDep) -> MemorySearchResponse:
+def memory_search(
+    body: MemorySearch,
+    session: SessionDep,
+    authorization: str | None = Header(default=None),
+) -> MemorySearchResponse:
     """Search agent memories by keyword during task execution. Audited.
 
     Searches the calling agent's own memories plus the shared project pool
     (agent_id='shared') using Postgres ILIKE. Returns up to max_results matches.
     """
+    try:
+        verify_capability_header(authorization)
+    except PermissionDeniedError as exc:
+        raise _deny(exc)
     # Derive agent_id from the running task (same trust model as /memory/upsert).
     try:
         _run, task = check_active_run(session, "", body.task_id)

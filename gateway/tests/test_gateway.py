@@ -13,13 +13,40 @@ Requires the Docker Compose stack (`make up`) to be running.
 from __future__ import annotations
 
 import subprocess
+import time
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from gateway.gateway.app import app, get_session
 from gateway.tests.conftest import make_run, make_task
+
+_TEST_SECRET = "test-capability-secret-32chars-xx"
+
+
+def _make_token(
+    run_id: str = "00000000-0000-0000-0000-000000000001",
+    task_id: str = "TASK-G01",
+    agent_id: str = "backend-agent",
+    write_scope: list[str] | None = None,
+    secret: str = _TEST_SECRET,
+    exp_offset: int = 3600,
+) -> str:
+    now = int(time.time())
+    return jwt.encode(
+        {
+            "run_id": run_id,
+            "task_id": task_id,
+            "agent_id": agent_id,
+            "write_scope": write_scope or [],
+            "iat": now,
+            "exp": now + exp_offset,
+        },
+        secret,
+        algorithm="HS256",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -804,3 +831,119 @@ def test_skill_dedup_reuses_existing_row(client, session):
     )
     assert len(rows) == 1
     assert rows[0].content == "Updated skill content."
+
+
+# ---------------------------------------------------------------------------
+# Capability token enforcement (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def test_token_required_when_secret_set(client, session, tmp_path, monkeypatch):
+    """Gateway returns 403 on missing token when CAPABILITY_SECRET is configured."""
+    monkeypatch.setenv("CAPABILITY_SECRET", _TEST_SECRET)
+    make_task(session, "TASK-CAP01", status="running")
+    make_run(session, "TASK-CAP01", agent_id="backend-agent")
+    session.flush()
+
+    resp = client.post(
+        "/read_artifact",
+        json={
+            "agent_id": "backend-agent",
+            "task_id": "TASK-CAP01",
+            "repo_path": str(tmp_path),
+            "path": "f.py",
+        },
+        # no Authorization header
+    )
+    assert resp.status_code == 403
+    assert "capability token" in resp.json()["detail"].lower()
+
+
+def test_valid_token_grants_access(client, session, tmp_path, monkeypatch):
+    """A valid token allows access when CAPABILITY_SECRET is configured."""
+    monkeypatch.setenv("CAPABILITY_SECRET", _TEST_SECRET)
+    (tmp_path / "ok.py").write_text("x = 1", encoding="utf-8")
+    make_task(session, "TASK-CAP02", status="running")
+    make_run(session, "TASK-CAP02", agent_id="backend-agent")
+    session.flush()
+
+    token = _make_token(task_id="TASK-CAP02", agent_id="backend-agent")
+    resp = client.post(
+        "/read_artifact",
+        json={
+            "agent_id": "backend-agent",
+            "task_id": "TASK-CAP02",
+            "repo_path": str(tmp_path),
+            "path": "ok.py",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["found"] is True
+
+
+def test_expired_token_returns_403(client, session, tmp_path, monkeypatch):
+    """An expired token is rejected even with valid signature."""
+    monkeypatch.setenv("CAPABILITY_SECRET", _TEST_SECRET)
+    make_task(session, "TASK-CAP03", status="running")
+    make_run(session, "TASK-CAP03", agent_id="backend-agent")
+    session.flush()
+
+    expired_token = _make_token(task_id="TASK-CAP03", exp_offset=-10)
+    resp = client.post(
+        "/read_artifact",
+        json={
+            "agent_id": "backend-agent",
+            "task_id": "TASK-CAP03",
+            "repo_path": str(tmp_path),
+            "path": "x.py",
+        },
+        headers={"Authorization": f"Bearer {expired_token}"},
+    )
+    assert resp.status_code == 403
+
+
+def test_write_scope_enforced(client, session, tmp_path, monkeypatch):
+    """write_artifact is blocked when path falls outside the token's write_scope."""
+    monkeypatch.setenv("CAPABILITY_SECRET", _TEST_SECRET)
+    make_task(session, "TASK-CAP04", status="running")
+    make_run(session, "TASK-CAP04", agent_id="backend-agent")
+    session.flush()
+
+    # Token scoped to app/ only; writing to tests/ should be blocked.
+    token = _make_token(task_id="TASK-CAP04", write_scope=["app/"])
+    resp = client.post(
+        "/write_artifact",
+        json={
+            "agent_id": "backend-agent",
+            "task_id": "TASK-CAP04",
+            "repo_path": str(tmp_path),
+            "path": "tests/test_thing.py",
+            "content": "pass",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 403
+    assert "write scope" in resp.json()["detail"].lower()
+
+
+def test_write_scope_allows_matching_path(client, session, tmp_path, monkeypatch):
+    """write_artifact succeeds when path is within write_scope."""
+    monkeypatch.setenv("CAPABILITY_SECRET", _TEST_SECRET)
+    make_task(session, "TASK-CAP05", status="running")
+    make_run(session, "TASK-CAP05", agent_id="backend-agent")
+    session.flush()
+
+    token = _make_token(task_id="TASK-CAP05", write_scope=["app/"])
+    resp = client.post(
+        "/write_artifact",
+        json={
+            "agent_id": "backend-agent",
+            "task_id": "TASK-CAP05",
+            "repo_path": str(tmp_path),
+            "path": "app/main.py",
+            "content": "pass",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200

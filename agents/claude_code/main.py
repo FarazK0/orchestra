@@ -151,6 +151,8 @@ def main(
     task_owner: str = pkg["task"]["owner"]
     branch: str = pkg["agent_instructions"]["branch"]
     commit_prefix: str = pkg["agent_instructions"].get("commit_prefix", f"[{task_id}]")
+    _cap_token: str = pkg.get("capability_token", "")
+    _auth_hdrs: dict = {"Authorization": f"Bearer {_cap_token}"} if _cap_token else {}
 
     repo_path = repo or os.getenv("SANDBOX_REPO_PATH", "./sandbox/sample-project")
     gw_url = gateway_url or os.getenv("GATEWAY_URL", "http://localhost:8081")
@@ -171,6 +173,7 @@ def main(
                     "repo_path": repo_path,
                     "branch": branch,
                 },
+                headers=_auth_hdrs,
             )
             log.info("Branch created: %s", branch)
         except httpx.HTTPStatusError as exc:
@@ -241,6 +244,7 @@ def main(
                     "message": f"{commit_prefix} {task_owner} output",
                     "paths": changed_paths,
                 },
+                headers=_auth_hdrs,
             )
             log.info("Committed: sha=%s", resp.get("sha", "?"))
         except httpx.HTTPStatusError as exc:
@@ -280,7 +284,7 @@ def main(
                     "key": f"skill/{task_id}",
                     "content": skill_content,
                 },
-                headers={"X-Platform-Actor": task_owner},
+                headers=_auth_hdrs,
             )
             log.info("Skill memory written for task %s", task_id)
         except Exception as exc:

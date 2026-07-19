@@ -242,8 +242,9 @@ def _call_gateway(
     gateway_url: str,
     path: str,
     payload: dict,
+    headers: dict | None = None,
 ) -> dict:
-    resp = http.post(f"{gateway_url}{path}", json=payload)
+    resp = http.post(f"{gateway_url}{path}", json=payload, headers=headers or {})
     resp.raise_for_status()
     return resp.json()
 
@@ -256,9 +257,11 @@ def _execute_gateway_tool(
     repo_path: str,
     gateway_url: str,
     http: httpx.Client,
+    auth_headers: dict | None = None,
 ) -> str:
     """Dispatch a single tool call to the gateway; return a text result."""
     base: dict = {"agent_id": agent_id, "task_id": task_id}
+    hdrs = auth_headers or {}
 
     if name == "read_artifact":
         data = _call_gateway(
@@ -266,6 +269,7 @@ def _execute_gateway_tool(
             gateway_url,
             "/read_artifact",
             {**base, "repo_path": repo_path, "path": tool_input["path"]},
+            headers=hdrs,
         )
         return data["content"] if data.get("found") else f"(not found: {tool_input['path']})"
 
@@ -280,6 +284,7 @@ def _execute_gateway_tool(
                 "path": tool_input["path"],
                 "content": tool_input["content"],
             },
+            headers=hdrs,
         )
         return f"Written: {tool_input['path']}"
 
@@ -289,6 +294,7 @@ def _execute_gateway_tool(
             gateway_url,
             "/run_command",
             {**base, "repo_path": repo_path, "command": tool_input["command"]},
+            headers=hdrs,
         )
         return (
             f"returncode={data['returncode']}\nstdout:\n{data['stdout']}\nstderr:\n{data['stderr']}"
@@ -304,6 +310,7 @@ def _execute_gateway_tool(
                 "event_type": tool_input["event_type"],
                 "payload": tool_input.get("payload", {}),
             },
+            headers=hdrs,
         )
         return f"Event emitted: {tool_input['event_type']}"
 
@@ -320,6 +327,7 @@ def _execute_gateway_tool(
                 "key": f"skill/{topic}/{task_id}",
                 "content": tool_input["content"],
             },
+            headers=hdrs,
         )
         return f"Skill memory written: {topic}"
 
@@ -327,7 +335,7 @@ def _execute_gateway_tool(
         payload: dict = {"task_id": task_id, "query": tool_input["query"]}
         if tool_input.get("memory_type"):
             payload["memory_type"] = tool_input["memory_type"]
-        data = _call_gateway(http, gateway_url, "/memory/search", payload)
+        data = _call_gateway(http, gateway_url, "/memory/search", payload, headers=hdrs)
         results = data.get("results", [])
         if not results:
             return "No matching memories found."
@@ -364,6 +372,8 @@ def run_agent_loop(
     instr: dict = context_package["agent_instructions"]
     branch: str = instr["branch"]
     commit_prefix: str = instr["commit_prefix"]
+    _cap_token: str = context_package.get("capability_token", "")
+    _auth_headers: dict = {"Authorization": f"Bearer {_cap_token}"} if _cap_token else {}
 
     messages: list[dict] = [{"role": "user", "content": format_context_package(context_package)}]
 
@@ -382,6 +392,7 @@ def run_agent_loop(
             gateway_url,
             "/git/branch",
             {"agent_id": agent_id, "task_id": task_id, "repo_path": repo_path, "branch": branch},
+            headers=_auth_headers,
         )
 
         for _iteration in range(max_iterations):
@@ -440,6 +451,7 @@ def run_agent_loop(
                             "message": commit_msg,
                             "paths": paths,
                         },
+                        headers=_auth_headers,
                     )
 
                     # Transition task to completed via orchestrator.
@@ -461,6 +473,7 @@ def run_agent_loop(
                         repo_path,
                         gateway_url,
                         http,
+                        auth_headers=_auth_headers,
                     )
                 except httpx.HTTPStatusError as exc:
                     result_text = f"Gateway error {exc.response.status_code}: {exc.response.text}"

@@ -26,6 +26,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .db import AgentMemory, Run, Task
+from .token import mint_token
 
 log = logging.getLogger(__name__)
 
@@ -252,6 +253,13 @@ def create_run(
     branch = f"agent/{agent_type}/{task_id}{suffix}"
     package["agent_instructions"]["branch"] = branch
     package["agent_instructions"]["agent_id"] = agent_id
+    package["capability_token"] = mint_token(
+        str(run_id),
+        task_id,
+        agent_id,
+        package["agent_instructions"]["write_scope"],
+        package["task"]["budget"],
+    )
 
     store_dir.mkdir(parents=True, exist_ok=True)
     package_path = store_dir / f"{run_id}.json"
