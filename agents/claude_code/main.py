@@ -93,6 +93,37 @@ def _build_instruction(pkg: dict, repo_path: str) -> str:
         )
         memory_section = "\n".join(parts)
 
+    task_id_val = task["id"]
+    discovery_section = f"""
+## When you need work outside your output scope
+
+If you need to write files NOT in the "Output files" list above, do NOT attempt it yourself.
+Instead run the following command, then STOP immediately and exit:
+
+  curl -s -X POST http://localhost:8081/emit_event \\
+      -H 'Content-Type: application/json' \\
+      -d '{{
+        "agent_id": "{task_owner}",
+        "task_id": "{task_id_val}",
+        "event_type": "TASK_DISCOVERED",
+        "payload": {{
+          "parent_task_id": "{task_id_val}",
+          "title": "<one-line title of the work needed>",
+          "reason": "<why your task needs this work>",
+          "owner_hint": "<backend-agent|frontend-agent|qa-agent|claude-code-agent>",
+          "outputs": ["<paths the new task will write>"],
+          "dependencies": [],
+          "checkpoint": {{
+            "summary": "<what you have done so far>",
+            "completed_steps": ["<list of completed steps>"],
+            "next_step": "<what to do after the child task runs>"
+          }}
+        }}}}'
+
+After running this command: stop all work, do not write more files, do not call task_complete,
+and exit. Orchestra will run the new task and restart you with the results.
+"""
+
     return f"""\
 You are acting as {task_owner} for this project.
 You are working on a software development task in the Git repository at {repo_path}.
@@ -113,8 +144,7 @@ Your work will be committed to branch `{branch}` (already checked out for you).
 ## Input files
 
 {inputs_list}
-{artifact_section}{memory_section}
-
+{artifact_section}{memory_section}{discovery_section}
 ## Rules
 
 - Work only within {repo_path}. Do not create files outside it.
@@ -218,6 +248,52 @@ def main(
             raise typer.Exit(1)
 
         log.info("claude CLI finished successfully")
+
+        # ── 2.5. Check for task discovery ─────────────────────────────────
+        # If the agent emitted TASK_DISCOVERED, exit cleanly — not a failure.
+        # The Scheduler (in Dispatcher) will block this task and create the child.
+        task_discovered = False
+        try:
+            disc_resp = http.get(
+                f"{orch_url}/tasks/{task_id}/events",
+                params={"event_type": "TASK_DISCOVERED"},
+            )
+            disc_resp.raise_for_status()
+            task_discovered = bool(disc_resp.json())
+        except Exception as exc:
+            log.warning("Could not check TASK_DISCOVERED events (non-fatal): %s", exc)
+
+        if task_discovered:
+            log.info("TASK_DISCOVERED emitted — committing partial work and suspending")
+            partial_status = subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=repo_path, text=True
+            )
+            partial = [
+                line[3:].strip()
+                for line in partial_status.splitlines()
+                if line.strip()
+                and "__pycache__" not in line
+                and not line[3:].strip().endswith(".pyc")
+            ]
+            if partial:
+                try:
+                    _call(
+                        http,
+                        "POST",
+                        f"{gw_url}/git/commit",
+                        json={
+                            "agent_id": task_owner,
+                            "task_id": task_id,
+                            "repo_path": repo_path,
+                            "message": f"{commit_prefix} partial work before discovery",
+                            "paths": partial,
+                        },
+                        headers=_auth_hdrs,
+                    )
+                    log.info("Partial work committed: %s", partial)
+                except Exception as exc:
+                    log.warning("Failed to commit partial work (non-fatal): %s", exc)
+            raise typer.Exit(0)
 
         # ── 3. Collect changed files ───────────────────────────────────────
         status_out = subprocess.check_output(

@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Generator
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -228,6 +228,38 @@ class MemorySearchResponse(BaseModel):
 # Platform actors allowed to bypass the running-task check and write any memory type.
 _PLATFORM_ACTORS: frozenset[str] = frozenset({"dispatcher", "root-agent"})
 
+# ---------------------------------------------------------------------------
+# Best-effort Redis publish for TASK_DISCOVERED events
+# ---------------------------------------------------------------------------
+
+_gw_publisher = None
+_gw_publisher_lock = None
+
+
+def _get_gw_publisher():
+    global _gw_publisher
+    if _gw_publisher is None:
+        try:
+            from orchestrator.orchestrator.streams import StreamPublisher, get_redis_url
+
+            _gw_publisher = StreamPublisher(get_redis_url())
+        except Exception:
+            pass
+    return _gw_publisher
+
+
+def _try_publish_task_discovered(event_id: str, task_id: str, payload: dict) -> None:
+    try:
+        pub = _get_gw_publisher()
+        if pub is not None:
+            pub.publish(event_id, "TASK_DISCOVERED", task_id, payload)
+    except Exception as exc:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Failed to publish TASK_DISCOVERED for task %s: %s", task_id, exc
+        )
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -420,6 +452,7 @@ def run_command(
 def emit_event(
     body: EventEmit,
     session: SessionDep,
+    bg: BackgroundTasks,
     authorization: str | None = Header(default=None),
 ) -> EventEmitResponse:
     """Write an event to the control plane on behalf of the agent. Audited."""
@@ -449,6 +482,15 @@ def emit_event(
         task_id=body.task_id,
         details={"event_type": body.event_type, "event_id": str(event.event_id)},
     )
+
+    # Publish TASK_DISCOVERED to Redis stream so the Dispatcher can process it.
+    if body.event_type == "TASK_DISCOVERED":
+        bg.add_task(
+            _try_publish_task_discovered,
+            str(event.event_id),
+            body.task_id,
+            body.payload,
+        )
 
     return EventEmitResponse(event_id=str(event.event_id))
 
@@ -498,8 +540,10 @@ def git_commit(
 ) -> GitCommitResponse:
     """Stage specified paths and commit in the managed repo. Audited."""
     try:
-        verify_capability_header(authorization)
+        claims = verify_capability_header(authorization)
         check_active_run(session, body.agent_id, body.task_id)
+        for p in body.paths:
+            check_write_scope(claims, p)
     except PermissionDeniedError as exc:
         raise _deny(exc)
 

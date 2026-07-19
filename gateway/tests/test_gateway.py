@@ -12,8 +12,10 @@ Requires the Docker Compose stack (`make up`) to be running.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import time
+from unittest.mock import patch
 
 import jwt
 import pytest
@@ -722,6 +724,96 @@ def test_memory_search_returns_matching_rows(client, memory_search_run):
     results = resp.json()["results"]
     assert len(results) == 1
     assert "ruff" in results[0]["snippet"]
+
+
+# ---------------------------------------------------------------------------
+# /git/commit — write_scope enforcement (v0.3)
+# ---------------------------------------------------------------------------
+
+
+_SCOPE_SECRET = "test-capability-secret-32chars-xx"
+
+
+@pytest.fixture
+def scoped_run(session, git_repo):
+    """Running task + run with write_scope limited to app/ prefix."""
+    make_task(session, "TASK-GWS", status="running")
+    make_run(session, "TASK-GWS", agent_id="backend-agent")
+    session.flush()
+    return "TASK-GWS", "backend-agent", git_repo
+
+
+def test_git_commit_within_write_scope_succeeds(client, scoped_run):
+    task_id, agent_id, repo = scoped_run
+    (repo / "app").mkdir(exist_ok=True)
+    (repo / "app" / "main.py").write_text("x = 1", encoding="utf-8")
+
+    token = _make_token(
+        task_id=task_id,
+        agent_id=agent_id,
+        write_scope=["app/"],
+        secret=_SCOPE_SECRET,
+    )
+    with patch.dict(os.environ, {"CAPABILITY_SECRET": _SCOPE_SECRET}):
+        resp = client.post(
+            "/git/commit",
+            json={
+                "agent_id": agent_id,
+                "task_id": task_id,
+                "repo_path": str(repo),
+                "message": "[TASK-GWS] in scope",
+                "paths": ["app/main.py"],
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200
+
+
+def test_git_commit_outside_write_scope_returns_403(client, scoped_run):
+    task_id, agent_id, repo = scoped_run
+    (repo / "infra").mkdir(exist_ok=True)
+    (repo / "infra" / "migration.sql").write_text("-- sql", encoding="utf-8")
+
+    token = _make_token(
+        task_id=task_id,
+        agent_id=agent_id,
+        write_scope=["app/"],
+        secret=_SCOPE_SECRET,
+    )
+    with patch.dict(os.environ, {"CAPABILITY_SECRET": _SCOPE_SECRET}):
+        resp = client.post(
+            "/git/commit",
+            json={
+                "agent_id": agent_id,
+                "task_id": task_id,
+                "repo_path": str(repo),
+                "message": "[TASK-GWS] out of scope",
+                "paths": ["infra/migration.sql"],
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 403
+
+
+def test_git_commit_no_token_skips_scope_check(client, scoped_run):
+    """Without a capability token (no CAPABILITY_SECRET), scope check is skipped."""
+    task_id, agent_id, repo = scoped_run
+    (repo / "anywhere.py").write_text("pass", encoding="utf-8")
+
+    # No CAPABILITY_SECRET set — backward-compat mode
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("CAPABILITY_SECRET", None)
+        resp = client.post(
+            "/git/commit",
+            json={
+                "agent_id": agent_id,
+                "task_id": task_id,
+                "repo_path": str(repo),
+                "message": "[TASK-GWS] no token",
+                "paths": ["anywhere.py"],
+            },
+        )
+    assert resp.status_code == 200
 
 
 def test_memory_search_empty_query_returns_all(client, memory_search_run):

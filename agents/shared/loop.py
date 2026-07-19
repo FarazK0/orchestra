@@ -26,6 +26,11 @@ from .llm import LLMClient
 # Tool definitions (Anthropic JSON schema format)
 # ---------------------------------------------------------------------------
 
+
+class _TaskDiscovered(Exception):
+    """Raised by _execute_gateway_tool when the agent calls discover_task."""
+
+
 GATEWAY_TOOLS: list[dict[str, Any]] = [
     {
         "name": "read_artifact",
@@ -153,6 +158,49 @@ GATEWAY_TOOLS: list[dict[str, Any]] = [
             "required": ["query"],
         },
     },
+    {
+        "name": "discover_task",
+        "description": (
+            "Use when you encounter work that MUST happen before you can continue "
+            "and is outside your write scope. Pauses this task, creates the required "
+            "task, and resumes you with the results after it completes. "
+            "Do NOT use for work within your scope — write it yourself. "
+            "If a write_artifact call returns 403, use this tool instead of retrying."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short title for the new task, e.g. 'Run database migration 005'.",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why this work must happen before your task can continue.",
+                },
+                "owner_hint": {
+                    "type": "string",
+                    "description": "Agent type to run the task: backend-agent, frontend-agent, qa-agent, or claude-code-agent.",
+                },
+                "outputs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Repo-relative paths the new task will write.",
+                },
+                "checkpoint": {
+                    "type": "object",
+                    "description": "Your current progress — used to resume you after the child task completes.",
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "completed_steps": {"type": "array", "items": {"type": "string"}},
+                        "next_step": {"type": "string"},
+                    },
+                    "required": ["summary", "completed_steps", "next_step"],
+                },
+            },
+            "required": ["title", "reason", "owner_hint", "outputs", "checkpoint"],
+        },
+    },
 ]
 
 
@@ -234,7 +282,9 @@ def format_context_package(pkg: dict) -> str:
         (
             "Use the provided tools for every file read/write/command. "
             "Call `task_complete` only after verifying each acceptance criterion above. "
-            "Use `write_memory` to record any reusable project conventions you discover."
+            "Use `write_memory` to record any reusable project conventions you discover. "
+            "If `write_artifact` returns a 403 error, that path is outside your write scope — "
+            "use `discover_task` to request the work instead of retrying the write."
         ),
     ]
     return "\n".join(lines)
@@ -351,6 +401,25 @@ def _execute_gateway_tool(
         for r in results:
             lines_out.append(f"[{r['memory_type']}] {r['key']}: {r['snippet']}")
         return "\n".join(lines_out)
+
+    if name == "discover_task":
+        discovery_payload = {
+            "parent_task_id": task_id,
+            "title": tool_input["title"],
+            "reason": tool_input["reason"],
+            "owner_hint": tool_input["owner_hint"],
+            "outputs": tool_input.get("outputs", []),
+            "dependencies": [],
+            "checkpoint": tool_input.get("checkpoint", {}),
+        }
+        _call_gateway(
+            http,
+            gateway_url,
+            "/emit_event",
+            {**base, "event_type": "TASK_DISCOVERED", "payload": discovery_payload},
+            headers=hdrs,
+        )
+        raise _TaskDiscovered()
 
     return f"Unknown tool: {name}"
 
@@ -483,6 +552,9 @@ def run_agent_loop(
                         http,
                         auth_headers=_auth_headers,
                     )
+                except _TaskDiscovered:
+                    # Agent requested work discovery — exit this run cleanly.
+                    return _finish("blocked")
                 except httpx.HTTPStatusError as exc:
                     result_text = f"Gateway error {exc.response.status_code}: {exc.response.text}"
 

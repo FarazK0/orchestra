@@ -46,7 +46,7 @@ def _make_context(tmp_path, task_id: str = "TASK-001") -> str:
 
 
 def _mock_http_client(call_log: list):
-    """Return a mock httpx.Client whose request() method records calls and returns canned JSON."""
+    """Return a mock httpx.Client whose request() and get() methods record calls and return canned JSON."""
 
     def _request(method, url, **kwargs):
         body = kwargs.get("json", {})
@@ -68,10 +68,19 @@ def _mock_http_client(call_log: list):
         mock_resp.raise_for_status.return_value = None
         return mock_resp
 
+    def _get(url, **kwargs):
+        call_log.append({"method": "GET", "url": url, "params": kwargs.get("params", {})})
+        # Default: no TASK_DISCOVERED events (normal completion flow)
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        mock_resp.raise_for_status.return_value = None
+        return mock_resp
+
     mock_client = MagicMock()
     mock_client.__enter__ = MagicMock(return_value=mock_client)
     mock_client.__exit__ = MagicMock(return_value=False)
     mock_client.request.side_effect = _request
+    mock_client.get.side_effect = _get
     return mock_client
 
 
@@ -142,6 +151,76 @@ def test_emit_event_called_before_transition(tmp_path):
     assert emit_idx < transition_idx, "emit_event should be called before transition"
 
 
+def test_task_discovered_exits_cleanly_without_completion(tmp_path):
+    """When TASK_DISCOVERED is emitted, main exits 0 without transitioning to completed."""
+    call_log: list = []
+    ctx = _make_context(tmp_path)
+
+    def _post_request(method, url, **kwargs):
+        body = kwargs.get("json", {})
+        call_log.append({"method": method, "url": url, "json": body})
+        if "/git/branch" in url:
+            resp_body = {"branch": "agent/backend/TASK-001", "created": True}
+        elif "/git/commit" in url:
+            resp_body = {"sha": "abc1234"}
+        elif "/emit_event" in url:
+            resp_body = {"event_id": "evt-discovery"}
+        elif "/transition" in url:
+            resp_body = {"id": "TASK-001", "status": "completed"}
+        else:
+            resp_body = {}
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = resp_body
+        mock_resp.raise_for_status.return_value = None
+        return mock_resp
+
+    def _get_request(url, **kwargs):
+        call_log.append({"method": "GET", "url": url, "params": kwargs.get("params", {})})
+        # Return a TASK_DISCOVERED event for the events endpoint
+        if "/events" in url:
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = [{"event_type": "TASK_DISCOVERED"}]
+            mock_resp.raise_for_status.return_value = None
+            return mock_resp
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {}
+        mock_resp.raise_for_status.return_value = None
+        return mock_resp
+
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.request.side_effect = _post_request
+    mock_client.get.side_effect = _get_request
+
+    # Git status shows one file (partial work before discovery)
+    with (
+        patch("subprocess.run") as mock_run,
+        patch("subprocess.check_output", return_value=" M partial.py\n"),
+        patch("httpx.Client", return_value=mock_client),
+    ):
+        mock_run.return_value = MagicMock(returncode=0, stdout="done", stderr="")
+
+        from typer.testing import CliRunner
+
+        from agents.claude_code.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["--context", ctx, "--run-id", "run-disc"])
+
+    # Should exit 0 (clean suspension)
+    assert result.exit_code == 0, result.output
+
+    # Must NOT have transitioned to completed
+    transition_calls = [c for c in call_log if "/transition" in c.get("url", "")]
+    assert transition_calls == [], f"Should not transition to completed; got: {transition_calls}"
+
+    # Should have committed the partial work
+    commit_calls = [c for c in call_log if "/git/commit" in c.get("url", "")]
+    assert len(commit_calls) == 1
+    assert commit_calls[0]["json"]["message"].endswith("partial work before discovery")
+
+
 def test_audit_emit_failure_is_non_fatal(tmp_path):
     """A failing emit_event call does not prevent task completion."""
     call_log: list = []
@@ -167,10 +246,17 @@ def test_audit_emit_failure_is_non_fatal(tmp_path):
         mock_resp.raise_for_status.return_value = None
         return mock_resp
 
+    def _get_no_discovery(url, **kwargs):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = []
+        mock_resp.raise_for_status.return_value = None
+        return mock_resp
+
     mock_client = MagicMock()
     mock_client.__enter__ = MagicMock(return_value=mock_client)
     mock_client.__exit__ = MagicMock(return_value=False)
     mock_client.request.side_effect = _request_with_emit_failure
+    mock_client.get.side_effect = _get_no_discovery
 
     with (
         patch("subprocess.run") as mock_run,

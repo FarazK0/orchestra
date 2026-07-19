@@ -35,7 +35,8 @@ from sqlalchemy.orm import Session
 
 from .context_packager import create_run
 from .dag import get_ready_successors, get_running_conflicts
-from .db import AuditRow, Run, Task, get_engine, get_session_factory
+from .db import AuditRow, Event, Run, Task, get_engine, get_session_factory
+from .scheduler import Scheduler
 from .state_machine import transition
 from .streams import STREAM_KEY, StreamConsumer, StreamPublisher
 
@@ -69,6 +70,7 @@ class Dispatcher:
         self._session_factory = session_factory
         self._gateway_url = gateway_url
         self._tick = 0
+        self._scheduler = Scheduler()
 
     # ------------------------------------------------------------------
     # Public API
@@ -103,6 +105,8 @@ class Dispatcher:
                 self._on_task_validated(task_id, session)
             elif event_type == "TASK_FAILED":
                 self._on_task_failed(task_id, session)
+            elif event_type == "TASK_DISCOVERED":
+                self._on_task_discovered(task_id, session)
 
     def _on_task_assigned(self, task_id: str, session: Session) -> None:
         """Create a run and launch the agent subprocess, unless blocked by a conflict."""
@@ -260,8 +264,42 @@ class Dispatcher:
         except Exception as exc:
             log.warning("Failed to write episode memory for %s: %s", task_id, exc)
 
+    def _on_task_discovered(self, task_id: str, session: Session) -> None:
+        """Process a TASK_DISCOVERED event: create child task, block parent."""
+        discovery_event = session.execute(
+            select(Event)
+            .where(Event.task_id == task_id, Event.event_type == "TASK_DISCOVERED")
+            .order_by(Event.emitted_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+        if discovery_event is None:
+            log.warning("No TASK_DISCOVERED event found for task %s", task_id)
+            return
+
+        child = self._scheduler.handle_task_discovered(session, discovery_event)
+        if child is None:
+            session.commit()  # persist any rejection events
+            return
+
+        assign_event = transition(session, child.id, "assigned", actor="dispatcher")
+        session.commit()
+
+        self._publisher.publish(
+            str(uuid.uuid4()),
+            "TASK_CREATED",
+            child.id,
+            {"parent_task_id": task_id, "title": child.title},
+        )
+        self._publisher.publish(str(assign_event.event_id), "TASK_ASSIGNED", child.id, {})
+        log.info(
+            "Task discovered: child %s created and assigned; parent %s blocked",
+            child.id,
+            task_id,
+        )
+
     def _on_task_completed(self, task_id: str, session: Session) -> None:
-        """Write episode memory, then advance any DAG successors that are now fully unblocked."""
+        """Write episode memory, advance DAG successors, and unblock waiting parents."""
         self._write_episode_memory(task_id, session)
         successors = get_ready_successors(task_id, session)
         for succ in successors:
@@ -269,6 +307,16 @@ class Dispatcher:
             session.commit()
             self._publisher.publish(str(event.event_id), "TASK_ASSIGNED", succ.id, {})
             log.info("Auto-assigned successor %s (unblocked by %s)", succ.id, task_id)
+
+        resumed = self._scheduler.on_child_terminal(session, task_id)
+        if resumed:
+            session.commit()
+            for parent in resumed:
+                self._publisher.publish(
+                    str(uuid.uuid4()), "TASK_RESUMED", parent.id, {"unblocked_by": task_id}
+                )
+                self._publisher.publish(str(uuid.uuid4()), "TASK_ASSIGNED", parent.id, {})
+                log.info("Parent %s resumed after child %s", parent.id, task_id)
 
     # ------------------------------------------------------------------
     # Agent launch
