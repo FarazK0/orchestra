@@ -338,12 +338,18 @@ Post-phase additions: `orchctl cancel`, `cancelled` state, sandbox reset tooling
   packager look it up. External content is wrapped in `<external-content>` delimiters in
   agent prompts (both Python loop and Claude Code); provenance rule injected into every
   agent's instruction set.
+- **Observability pass (Step 27):** Both FastAPI services expose `/metrics` via
+  `prometheus-fastapi-instrumentator` (HTTP request counters + latency histograms) plus
+  four application-level counters/histograms: task lifecycle, cumulative LLM cost, validator
+  outcomes, human review queue latency. OTel FastAPI auto-instrumentation exports to Jaeger
+  all-in-one when `OTLP_ENDPOINT` is set (no-op otherwise). Grafana pre-provisioned with
+  Prometheus datasource and seven-panel Orchestra dashboard. See ADR-007.
 
 **Next in queue:**
 - **Per-write audit for claude-code-agent:** gateway intercept or post-commit diff audit.
 - **Policy file for risk tiers:** configurable Tier 1/2 gates per project.
-- **Observability pass:** OTel traces per run, Prometheus metrics, Grafana dashboard
-  (tasks by state, cost per task, validator pass rate, human queue latency).
+- **Validator provenance check:** refuse to validate a task whose outputs carry
+  `provenance=external`.
 
 ### Phase 4 — Scale and polish (planned)
 
@@ -362,6 +368,7 @@ spawning with inherited-and-narrowed capabilities, load testing, v1.0 doc.
 | ADR-004 | Event sourcing for orchestrator state (append-only events table) |
 | ADR-005 | Gateway as Phase 1 sandbox (subprocess on host; Docker isolation deferred) |
 | ADR-006 | Capability tokens: HS256 JWT for gateway authorization, write-scope enforcement |
+| ADR-007 | Observability: pull-based Prometheus, Jaeger all-in-one, OTel auto-instrumentation |
 
 ---
 

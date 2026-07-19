@@ -48,6 +48,12 @@ Retrospective: `docs/design/phase2-retro.md`.
 Agent memory system (Step 24 done): identity, episode, and skill memories persisted in
 `agent_memories` Postgres table; injected into every context package; written by root agent,
 dispatcher, and agents themselves via gateway.
+Capability tokens (Step 25 done): HS256 JWT minted at run creation, verified by gateway;
+write-scope enforcement on `write_artifact`; see ADR-006.
+Provenance metadata (Step 26 done): `artifact_provenance` table; external content wrapped
+in `<external-content>` delimiters in agent prompts.
+Observability (Step 27 done): Prometheus + OTel traces on both services; Grafana dashboard;
+Jaeger all-in-one; see ADR-007.
 
 Phase gates and weekly breakdown are in the design doc, Part 5.
 
