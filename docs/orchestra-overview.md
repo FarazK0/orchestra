@@ -37,7 +37,8 @@ The mental model is a software engineering organisation, not a swarm:
                            │  gateway mediates all reads/writes
 ┌──────────────────────────┴──────────────────────────────┐
 │  CONTROL PLANE  (Postgres + Redis)                      │
-│  Tables:  tasks, events, runs, audit_rows, agent_memories│
+│  Tables:  tasks, events, runs, audit, agent_memories,      │
+│           artifact_provenance                               │
 │  Bus:     Redis Streams  orchestra:events               │
 │  State:   task DAG, lifecycle, memory, audit log        │
 └─────────────────────────────────────────────────────────┘
@@ -231,9 +232,6 @@ are included automatically.
 
 - Token revocation: Redis-based blocklist to immediately invalidate tokens when a task
   is cancelled, eliminating the current grace-period window (Phase 4).
-- Provenance metadata on artifacts: `human` / `agent` / `external`.
-  External-provenance content wrapped in delimiter tags before entering prompts;
-  never placed in system prompts.
 
 ---
 
@@ -255,13 +253,13 @@ orchestra/
 ├── schemas/               JSON Schemas: Task, Event, AgentIdentity, RunRecord, Capability
 ├── cli/                   orchctl: request, create-task, list, approve, run-task,
 │                            validate, merge, review, memory list/show/delete, cancel
-├── infra/                 Alembic migrations (001-006)
+├── infra/                 Alembic migrations (001-007)
 ├── scripts/
 │   ├── setup.sh           one-command onboarding: starts all services, optional spec
 │   └── demo_v2.sh         Phase 2 three-task fan-out demo
 ├── docs/
 │   ├── design/            design docs and retros
-│   └── adr/               ADR-001 to ADR-005 (never deleted)
+│   └── adr/               ADR-001 to ADR-006 (never deleted)
 └── sandbox/sample-project managed demo repo agents operate on
 ```
 
@@ -334,11 +332,14 @@ Post-phase additions: `orchctl cancel`, `cancelled` state, sandbox reset tooling
   and expiry before the DB check. Write-scope enforcement on `write_artifact` restricts
   paths to `task.outputs`. Opt-in via `CAPABILITY_SECRET` env var; backwards-compatible.
   See ADR-006.
+- **Provenance metadata (Step 26):** `artifact_provenance` table (migration 007) tracks
+  trust level per file: `human` (ADRs, specs), `agent` (default), `external` (web content,
+  third-party data). Gateway upserts on every `write_artifact`; `read_artifact` and context
+  packager look it up. External content is wrapped in `<external-content>` delimiters in
+  agent prompts (both Python loop and Claude Code); provenance rule injected into every
+  agent's instruction set.
 
 **Next in queue:**
-
-- **Provenance metadata:** `human` / `agent` / `external` on artifacts; external
-  content wrapped in delimiter tags in prompts; validator flags provenance laundering.
 - **Per-write audit for claude-code-agent:** gateway intercept or post-commit diff audit.
 - **Policy file for risk tiers:** configurable Tier 1/2 gates per project.
 - **Observability pass:** OTel traces per run, Prometheus metrics, Grafana dashboard
