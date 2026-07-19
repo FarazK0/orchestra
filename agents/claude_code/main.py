@@ -253,11 +253,37 @@ def main(
                 },
                 headers=_auth_hdrs,
             )
-            log.info("Committed: sha=%s", resp.get("sha", "?"))
+            sha = resp.get("sha", "?")
+            log.info("Committed: sha=%s", sha)
         except httpx.HTTPStatusError as exc:
             log.error("Commit failed: %s", exc.response.text)
             _mark_failed(http, orch_url, task_id)
             raise typer.Exit(1)
+
+        # ── 4.5. Audit per-file writes (non-fatal) ────────────────────────
+        # The claude CLI writes files directly without going through the gateway,
+        # so individual writes are not audited in-flight. This emit_event records
+        # the complete set of files written as part of this run, closing the gap.
+        try:
+            _call(
+                http,
+                "POST",
+                f"{gw_url}/emit_event",
+                json={
+                    "agent_id": task_owner,
+                    "task_id": task_id,
+                    "event_type": "CLAUDE_CODE_FILES_WRITTEN",
+                    "payload": {
+                        "paths": changed_paths,
+                        "sha": sha,
+                        "run_id": run_id,
+                    },
+                },
+                headers=_auth_hdrs,
+            )
+            log.info("File-write audit emitted: %d file(s), sha=%s", len(changed_paths), sha)
+        except Exception as exc:
+            log.warning("File-write audit emit failed (non-fatal): %s", exc)
 
         # ── 5. Transition task to completed ───────────────────────────────
         try:
