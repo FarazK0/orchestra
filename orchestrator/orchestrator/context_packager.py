@@ -25,7 +25,7 @@ from pathlib import Path
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from .db import AgentMemory, Run, Task
+from .db import AgentMemory, ArtifactProvenance, Run, Task
 from .token import mint_token
 
 log = logging.getLogger(__name__)
@@ -76,20 +76,50 @@ def build_context_package(
     if task is None:
         raise TaskNotFoundError(f"Task {task_id!r} not found")
 
+    repo_path_str = str(repo_path)
+
+    def _lookup_provenance(rel_path: str) -> str:
+        """Return stored provenance for rel_path, falling back to heuristics."""
+        row = session.execute(
+            select(ArtifactProvenance).where(
+                ArtifactProvenance.repo_path == repo_path_str,
+                ArtifactProvenance.file_path == rel_path,
+            )
+        ).scalar_one_or_none()
+        if row is not None:
+            return row.provenance
+        if rel_path.startswith("docs/adr/"):
+            return "human"
+        return "agent"
+
     # Input artifacts listed in the task spec
     input_artifacts: list[dict] = []
     for rel_path in task.inputs:
         content = _read_file(repo_path / rel_path)
-        input_artifacts.append({"path": rel_path, "content": content, "found": content is not None})
+        provenance = _lookup_provenance(rel_path)
+        input_artifacts.append(
+            {
+                "path": rel_path,
+                "content": content,
+                "found": content is not None,
+                "provenance": provenance,
+            }
+        )
 
-    # ADRs from docs/adr/ -- decision memory for the agent
+    # ADRs from docs/adr/ -- always human-provenance decision records
     adr_dir = repo_path / "docs" / "adr"
     adrs: list[dict] = []
     if adr_dir.is_dir():
         for adr_file in sorted(adr_dir.glob("*.md")):
             content = _read_file(adr_file)
             if content is not None:
-                adrs.append({"path": str(adr_file.relative_to(repo_path)), "content": content})
+                adrs.append(
+                    {
+                        "path": str(adr_file.relative_to(repo_path)),
+                        "content": content,
+                        "provenance": "human",
+                    }
+                )
 
     # Agent memory: top-K per type ordered by recency, plus shared project conventions.
     # Separate queries per type so each gets its own LIMIT without cross-type interference.

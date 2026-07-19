@@ -947,3 +947,99 @@ def test_write_scope_allows_matching_path(client, session, tmp_path, monkeypatch
         headers={"Authorization": f"Bearer {token}"},
     )
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Provenance persistence (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def test_write_artifact_persists_provenance(client, session, active_run):
+    """write_artifact upserts an artifact_provenance row."""
+    from sqlalchemy import select as sa_select
+
+    from orchestrator.orchestrator.db import ArtifactProvenance
+
+    task_id, agent_id, repo = active_run
+    resp = client.post(
+        "/write_artifact",
+        json={
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "repo_path": str(repo),
+            "path": "ext.md",
+            "content": "external data",
+            "provenance": "external",
+        },
+    )
+    assert resp.status_code == 200
+
+    session.flush()
+    row = session.execute(
+        sa_select(ArtifactProvenance).where(
+            ArtifactProvenance.repo_path == str(repo),
+            ArtifactProvenance.file_path == "ext.md",
+        )
+    ).scalar_one_or_none()
+    assert row is not None
+    assert row.provenance == "external"
+    assert row.set_by_task == task_id
+
+
+def test_read_artifact_returns_stored_provenance(client, session, active_run):
+    """read_artifact reflects provenance stored by a prior write."""
+    task_id, agent_id, repo = active_run
+
+    # Write with external provenance first.
+    client.post(
+        "/write_artifact",
+        json={
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "repo_path": str(repo),
+            "path": "data.txt",
+            "content": "raw scraped content",
+            "provenance": "external",
+        },
+    )
+
+    # Now read it back — should reflect the stored provenance.
+    resp = client.post(
+        "/read_artifact",
+        json={
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "repo_path": str(repo),
+            "path": "data.txt",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["provenance"] == "external"
+
+
+def test_write_artifact_default_provenance_is_agent(client, session, active_run):
+    """write_artifact with no provenance field defaults to 'agent'."""
+    from sqlalchemy import select as sa_select
+
+    from orchestrator.orchestrator.db import ArtifactProvenance
+
+    task_id, agent_id, repo = active_run
+    client.post(
+        "/write_artifact",
+        json={
+            "agent_id": agent_id,
+            "task_id": task_id,
+            "repo_path": str(repo),
+            "path": "output.py",
+            "content": "x = 1",
+        },
+    )
+    session.flush()
+    row = session.execute(
+        sa_select(ArtifactProvenance).where(
+            ArtifactProvenance.repo_path == str(repo),
+            ArtifactProvenance.file_path == "output.py",
+        )
+    ).scalar_one_or_none()
+    assert row is not None
+    assert row.provenance == "agent"

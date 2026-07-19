@@ -28,11 +28,12 @@ from typing import Annotated, Any, Generator
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from sqlalchemy import select
-
 from orchestrator.orchestrator.db import AgentMemory
+from orchestrator.orchestrator.db import ArtifactProvenance
 from orchestrator.orchestrator.db import Event as EventORM
 from orchestrator.orchestrator.db import Task as TaskORM
 from orchestrator.orchestrator.db import get_engine, get_session_factory
@@ -264,15 +265,26 @@ def read_artifact(
         content = None
         found = False
 
-    # Infer provenance: human-authored ADRs are human; everything else is agent.
-    provenance = "human" if body.path.startswith("docs/adr/") else "agent"
+    # Look up stored provenance; fall back to heuristics when no record exists.
+    prov_row = session.execute(
+        select(ArtifactProvenance).where(
+            ArtifactProvenance.repo_path == body.repo_path,
+            ArtifactProvenance.file_path == body.path,
+        )
+    ).scalar_one_or_none()
+    if prov_row is not None:
+        provenance = prov_row.provenance
+    elif body.path.startswith("docs/adr/"):
+        provenance = "human"
+    else:
+        provenance = "agent"
 
     write_gateway_audit(
         session,
         actor=body.agent_id,
         operation="read_artifact",
         task_id=body.task_id,
-        details={"path": body.path, "found": found},
+        details={"path": body.path, "found": found, "provenance": provenance},
     )
 
     return ArtifactReadResponse(path=body.path, content=content, found=found, provenance=provenance)
@@ -300,6 +312,24 @@ def write_artifact(
 
     full_path.parent.mkdir(parents=True, exist_ok=True)
     full_path.write_text(body.content, encoding="utf-8")
+
+    # Persist provenance so future readers (context packager, read_artifact) can look it up.
+    _now = datetime.now(timezone.utc)
+    session.execute(
+        pg_insert(ArtifactProvenance)
+        .values(
+            id=uuid.uuid4(),
+            repo_path=body.repo_path,
+            file_path=body.path,
+            provenance=body.provenance,
+            set_by_task=body.task_id,
+            set_at=_now,
+        )
+        .on_conflict_do_update(
+            constraint="uq_artifact_provenance",
+            set_={"provenance": body.provenance, "set_by_task": body.task_id, "set_at": _now},
+        )
+    )
 
     write_gateway_audit(
         session,

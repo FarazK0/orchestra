@@ -1,12 +1,13 @@
 """SQLAlchemy ORM models for the Orchestra control plane.
 
-Six tables:
-  tasks            - mutable task state (status is the only frequently-written column)
-  events           - append-only event log (never UPDATE or DELETE)
-  runs             - one row per agent run attempt
-  audit            - one row per auditable action, joined to the triggering event
-  stream_deliveries - dedup table for Redis Streams exactly-once processing
-  agent_memories   - persistent memory for specialist agents (identity, episodes, skills)
+Seven tables:
+  tasks               - mutable task state (status is the only frequently-written column)
+  events              - append-only event log (never UPDATE or DELETE)
+  runs                - one row per agent run attempt
+  audit               - one row per auditable action, joined to the triggering event
+  stream_deliveries   - dedup table for Redis Streams exactly-once processing
+  agent_memories      - persistent memory for specialist agents (identity, episodes, skills)
+  artifact_provenance - per-file trust level (human / agent / external)
 """
 
 from __future__ import annotations
@@ -152,6 +153,30 @@ class AgentMemory(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (UniqueConstraint("agent_id", "project_id", "key", name="uq_agent_memory"),)
+
+
+class ArtifactProvenance(Base):
+    """Per-file trust level set when an agent writes via the gateway.
+
+    Three provenance values:
+      human    - written or approved by a human (ADRs, specs, policy files)
+      agent    - produced by an agent from trusted inputs (default)
+      external - contains or derives from web content, third-party docs, or user uploads
+
+    External-provenance content is wrapped in <external-content> delimiters when
+    injected into agent prompts and never placed in system prompts.
+    """
+
+    __tablename__ = "artifact_provenance"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    repo_path: Mapped[str] = mapped_column(Text, nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    provenance: Mapped[str] = mapped_column(Text, nullable=False, default="agent")
+    set_by_task: Mapped[str | None] = mapped_column(String, ForeignKey("tasks.id"), nullable=True)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (UniqueConstraint("repo_path", "file_path", name="uq_artifact_provenance"),)
 
 
 def get_engine(url: str | None = None):
