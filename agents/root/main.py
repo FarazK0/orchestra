@@ -34,7 +34,7 @@ from dotenv import load_dotenv
 from agents.planner.plan_utils import CHANGE_REQUEST_SYSTEM_PROMPT, parse_task_plan, topo_sort
 from agents.shared.llm import LLMClient
 from orchestrator.orchestrator.db import get_engine, get_session_factory
-from orchestrator.orchestrator.streams import ROOT_STREAM_KEY, StreamConsumer
+from orchestrator.orchestrator.streams import ROOT_STREAM_KEY, StreamConsumer, StreamPublisher
 
 load_dotenv()
 
@@ -431,6 +431,7 @@ class RootAgent:
         self._repo = repo_path
         self._orch_url = orch_url
         self._gateway_url = gateway_url
+        self._redis_url = redis_url
         self._consumer = StreamConsumer(
             consumer_group="root-agent",
             consumer_name="root-0",
@@ -438,8 +439,121 @@ class RootAgent:
             redis_url=redis_url,
             stream_key=ROOT_STREAM_KEY,
         )
+        self._root_publisher: StreamPublisher | None = None
         self._agent_type = os.getenv("AGENT_TYPE", "claude-code")
         self._tick = 0
+
+    # ------------------------------------------------------------------
+    # Planner re-entry (Stage 5)
+    # ------------------------------------------------------------------
+
+    def _handle_replan(self, payload: dict) -> None:
+        """Re-evaluate the task plan after a task discovery event.
+
+        Fetches all pending tasks, builds a focused prompt describing the
+        newly discovered work, calls the planner, and submits any additional
+        tasks the planner decides are necessary.  Emits PLAN_UPDATED when
+        at least one new task is added.
+        """
+        trigger_task_id = payload.get("trigger_task_id", "")
+        child_task_id = payload.get("child_task_id", "")
+        reason = payload.get("reason", "")
+
+        log.info("Replan: trigger=%s child=%s", trigger_task_id, child_task_id)
+
+        # 1. Fetch current task list.
+        try:
+            with httpx.Client(base_url=self._orch_url, timeout=10.0) as client:
+                all_tasks = client.get("/tasks").json()
+        except Exception as exc:
+            log.error("Replan: could not fetch tasks: %s", exc)
+            return
+
+        # 2. Only bother replanning if there are other pending tasks besides the child.
+        pending_statuses = {"created", "assigned"}
+        other_pending = [
+            t
+            for t in all_tasks
+            if t.get("status") in pending_statuses and t.get("id") != child_task_id
+        ]
+        if not other_pending:
+            log.info("Replan: no other pending tasks; nothing to replan")
+            return
+
+        # 3. Build a focused prompt asking whether any plan adjustments are needed.
+        pending_summary = "\n".join(
+            f"  [{t['id']}] ({t['status']}) {t['title']}" for t in other_pending
+        )
+        replan_description = (
+            f"A new task was discovered during execution.\n"
+            f"Reason: {reason}\n"
+            f"New child task ID: {child_task_id}\n"
+            f"Parent task ID: {trigger_task_id}\n\n"
+            f"Pending tasks that may be affected:\n{pending_summary}\n\n"
+            "If any of these pending tasks should now depend on the new child task, "
+            "or if new supporting tasks must be added, output them in the standard "
+            "JSON plan format.  Only output truly necessary additions or adjustments. "
+            "If no changes are needed, output an empty JSON array []."
+        )
+
+        snapshot = _project_snapshot(self._repo)
+        existing = _fetch_existing_tasks(self._orch_url)
+        use_api = self._agent_type == "python" and os.getenv("ANTHROPIC_API_KEY", "").strip()
+
+        try:
+            if use_api:
+                raw = _decompose_with_llm(replan_description, "", snapshot, existing)
+            else:
+                raw = _decompose_with_claude(replan_description, "", snapshot, existing)
+        except Exception as exc:
+            log.warning("Replan: decomposition failed: %s", exc)
+            return
+
+        # 4. Parse and submit any new tasks.
+        try:
+            plan = parse_task_plan(raw)
+        except (json.JSONDecodeError, IndexError, ValueError):
+            log.info("Replan: planner returned no parseable plan; no changes made")
+            return
+
+        if not plan:
+            log.info("Replan: planner decided no changes are needed")
+            return
+
+        log.info("Replan: adding %d new task(s)", len(plan))
+        change_id = str(uuid.uuid4())
+        try:
+            new_task_ids = _submit_tasks(
+                plan,
+                self._orch_url,
+                change_id,
+                gateway_url=self._gateway_url,
+                snapshot=snapshot,
+                description=replan_description,
+            )
+        except Exception as exc:
+            log.error("Replan: task submission failed: %s", exc)
+            return
+
+        # 5. Emit PLAN_UPDATED to root stream so any observer can track the change.
+        if self._root_publisher is None:
+            self._root_publisher = StreamPublisher(self._redis_url)
+        try:
+            self._root_publisher.publish(
+                str(uuid.uuid4()),
+                "PLAN_UPDATED",
+                trigger_task_id,
+                {
+                    "trigger_task_id": trigger_task_id,
+                    "child_task_id": child_task_id,
+                    "new_task_ids": new_task_ids,
+                    "reason": reason,
+                },
+                stream_key=ROOT_STREAM_KEY,
+            )
+            log.info("PLAN_UPDATED emitted: %d new task(s) added", len(new_task_ids))
+        except Exception as exc:
+            log.warning("Could not emit PLAN_UPDATED: %s", exc)
 
     def start(self) -> None:
         self._consumer.ensure_group()
@@ -453,6 +567,16 @@ class RootAgent:
 
     def _handle(self, fields: dict) -> None:
         event_type = fields.get("event_type", "")
+
+        if event_type == "PLAN_REPLAN_REQUESTED":
+            try:
+                payload = json.loads(fields.get("payload", "{}"))
+            except json.JSONDecodeError:
+                log.warning("Bad payload JSON in PLAN_REPLAN_REQUESTED")
+                return
+            self._handle_replan(payload)
+            return
+
         if event_type != "CHANGE_REQUEST":
             log.debug("Ignoring event_type=%s", event_type)
             return

@@ -18,9 +18,9 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from orchestrator.orchestrator.db import Run, Task
+from orchestrator.orchestrator.db import Event, Run, Task
 from orchestrator.orchestrator.dispatcher import Dispatcher
-from orchestrator.orchestrator.streams import STREAM_KEY
+from orchestrator.orchestrator.streams import ROOT_STREAM_KEY, STREAM_KEY
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +419,124 @@ def test_on_task_failed_skips_non_failed_task(clean_db, redis_client, session_fa
     with session_factory() as s:
         task = s.get(Task, task_id)
         assert task.status == "running"
+
+
+# ---------------------------------------------------------------------------
+# _on_task_discovered — replan triggering
+# ---------------------------------------------------------------------------
+
+
+def _make_task_full(
+    session_factory,
+    task_id: str,
+    status: str,
+    depends_on: list[str] | None = None,
+    outputs: list[str] | None = None,
+    spawn_depth: int = 0,
+    parent_task_id: str | None = None,
+):
+    """Insert a Task with full v0.3 fields."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    with session_factory() as s:
+        task = Task(
+            id=task_id,
+            schema_version=1,
+            title=f"Task {task_id}",
+            owner="backend-agent",
+            status=status,
+            depends_on=depends_on or [],
+            inputs=[],
+            outputs=outputs or [],
+            acceptance=[],
+            risk_tier=1,
+            budget={"tokens": 10_000, "wall_clock_min": 5, "retries": 1},
+            spawn_depth=spawn_depth,
+            blocked_by=[],
+            parent_task_id=parent_task_id,
+            created_at=now,
+            updated_at=now,
+        )
+        s.add(task)
+        s.commit()
+
+
+def _make_discovery_event(session_factory, parent_task_id: str, deps: list[str]) -> None:
+    """Insert a TASK_DISCOVERED event for parent_task_id with given dependencies."""
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    with session_factory() as s:
+        ev = Event(
+            event_id=_uuid.uuid4(),
+            schema_version=1,
+            event_type="TASK_DISCOVERED",
+            task_id=parent_task_id,
+            emitted_by="backend-agent",
+            emitted_at=now,
+            payload={
+                "parent_task_id": parent_task_id,
+                "title": "Run DB migration",
+                "owner_hint": "backend-agent",
+                "reason": "Migration must run before schema use",
+                "outputs": [],
+                "dependencies": deps,
+                "checkpoint": {"summary": "done step 1", "completed_steps": [], "next_step": ""},
+            },
+        )
+        s.add(ev)
+        s.commit()
+
+
+def test_on_task_discovered_triggers_replan_when_child_has_pending_dep(
+    clean_db, redis_client, session_factory, dispatcher
+):
+    """When a discovered child depends on a pending task, PLAN_REPLAN_REQUESTED is
+    published to the root:requests stream."""
+    redis_client.delete(ROOT_STREAM_KEY)  # ensure clean root stream
+
+    # A pending dependency that already exists in the task graph
+    _make_task_full(session_factory, "TASK-DR1", "created")
+    # The running parent that discovers the child work
+    _make_task_full(session_factory, "TASK-DR2", "running")
+    # The discovery event requests a child that depends on TASK-DR1
+    _make_discovery_event(session_factory, "TASK-DR2", deps=["TASK-DR1"])
+
+    with session_factory() as session:
+        with patch("subprocess.Popen"):
+            dispatcher._on_task_discovered("TASK-DR2", session)
+
+    # PLAN_REPLAN_REQUESTED must be in the root:requests stream
+    root_messages = dispatcher._publisher._r.xrange(ROOT_STREAM_KEY)
+    replan_msgs = [
+        m for _, m in root_messages if m.get("event_type") == "PLAN_REPLAN_REQUESTED"
+    ]
+    assert len(replan_msgs) == 1
+    import json as _json
+    pl = _json.loads(replan_msgs[0]["payload"])
+    assert pl["trigger_task_id"] == "TASK-DR2"
+    assert "child_task_id" in pl
+
+
+def test_on_task_discovered_no_replan_when_child_has_no_deps(
+    clean_db, redis_client, session_factory, dispatcher
+):
+    """A discovered child with no dependencies should NOT trigger a replan."""
+    redis_client.delete(ROOT_STREAM_KEY)  # ensure clean root stream
+    _make_task_full(session_factory, "TASK-DN1", "running")
+    _make_discovery_event(session_factory, "TASK-DN1", deps=[])  # no deps
+
+    with session_factory() as session:
+        with patch("subprocess.Popen"):
+            dispatcher._on_task_discovered("TASK-DN1", session)
+
+    root_messages = dispatcher._publisher._r.xrange(ROOT_STREAM_KEY)
+    replan_msgs = [
+        m for _, m in root_messages if m.get("event_type") == "PLAN_REPLAN_REQUESTED"
+    ]
+    assert len(replan_msgs) == 0
 
 
 def test_recover_stale_skips_task_with_active_run(

@@ -41,7 +41,7 @@ from .db import get_engine, get_session_factory
 from .metrics import human_queue_latency_seconds, tasks_total
 from .policy import get_policy
 from .state_machine import InvalidTransitionError, TaskNotFoundError, transition
-from .streams import StreamPublisher
+from .streams import ROOT_STREAM_KEY, StreamPublisher
 from .telemetry import setup_tracing
 
 log = logging.getLogger(__name__)
@@ -73,6 +73,7 @@ _instrumentator = Instrumentator().instrument(app)
 # ---------------------------------------------------------------------------
 
 _publisher: StreamPublisher | None = None
+_root_publisher: StreamPublisher | None = None
 
 
 def _try_publish(event_id: str, event_type: str, task_id: str, payload: dict) -> None:
@@ -83,6 +84,22 @@ def _try_publish(event_id: str, event_type: str, task_id: str, payload: dict) ->
         _publisher.publish(event_id, event_type, task_id, payload)
     except redis.exceptions.RedisError as exc:
         log.warning("Redis publish failed for event %s: %s", event_id, exc)
+
+
+def _try_publish_replan(event_id: str, payload: dict) -> None:
+    global _root_publisher
+    if _root_publisher is None:
+        _root_publisher = StreamPublisher()
+    try:
+        _root_publisher.publish(
+            event_id,
+            "PLAN_REPLAN_REQUESTED",
+            payload.get("trigger_task_id", ""),
+            payload,
+            stream_key=ROOT_STREAM_KEY,
+        )
+    except redis.exceptions.RedisError as exc:
+        log.warning("Root stream publish failed for replan %s: %s", event_id, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +205,12 @@ class AgentMemorySchema(BaseModel):
 
 class MemoryDeleteRequest(BaseModel):
     reason: str = "human deleted"
+
+
+class ReplanRequest(BaseModel):
+    trigger_task_id: str
+    child_task_id: str
+    reason: str
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +466,29 @@ def list_task_audit(task_id: str, session: SessionDep) -> list[dict]:
         }
         for r in rows
     ]
+
+
+@app.post("/scheduler/replan", status_code=202)
+def trigger_replan(body: ReplanRequest, bg: BackgroundTasks) -> dict:
+    """Request the root agent to re-evaluate the task plan after a task discovery.
+
+    Publishes PLAN_REPLAN_REQUESTED to the root:requests stream.  The root agent
+    consumes the event and decides whether to add or re-order pending tasks.
+    Returns immediately; publishing happens in a background task.
+    """
+    import uuid as _uuid
+
+    event_id = str(_uuid.uuid4())
+    payload = {
+        "trigger_task_id": body.trigger_task_id,
+        "child_task_id": body.child_task_id,
+        "reason": body.reason,
+    }
+    bg.add_task(_try_publish_replan, event_id, payload)
+    log.info(
+        "Replan queued: trigger=%s child=%s", body.trigger_task_id, body.child_task_id
+    )
+    return {"status": "queued", "event_id": event_id}
 
 
 @app.get("/agent-memories", response_model=list[AgentMemorySchema])

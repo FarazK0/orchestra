@@ -482,3 +482,53 @@ def test_tier1_transition_not_blocked(client, session):
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "merged"
+
+
+# ---------------------------------------------------------------------------
+# POST /scheduler/replan
+# ---------------------------------------------------------------------------
+
+
+def test_trigger_replan_returns_202(client):
+    from unittest.mock import patch
+
+    with patch("orchestrator.orchestrator.api._try_publish_replan"):
+        resp = client.post(
+            "/scheduler/replan",
+            json={
+                "trigger_task_id": "TASK-001",
+                "child_task_id": "TASK-002",
+                "reason": "DB migration discovered during auth task",
+            },
+        )
+    assert resp.status_code == 202
+    body = resp.json()
+    assert body["status"] == "queued"
+    assert "event_id" in body
+    assert len(body["event_id"]) == 36  # UUID length
+
+
+def test_trigger_replan_publishes_correct_payload(client):
+    from unittest.mock import patch
+
+    captured: list[tuple] = []
+
+    def _capture(event_id: str, payload: dict) -> None:
+        captured.append((event_id, payload))
+
+    with patch("orchestrator.orchestrator.api._try_publish_replan", side_effect=_capture):
+        resp = client.post(
+            "/scheduler/replan",
+            json={
+                "trigger_task_id": "TASK-010",
+                "child_task_id": "TASK-011",
+                "reason": "Frontend depends on new auth API",
+            },
+        )
+    assert resp.status_code == 202
+    # Background task runs synchronously in TestClient
+    assert len(captured) == 1
+    _, payload = captured[0]
+    assert payload["trigger_task_id"] == "TASK-010"
+    assert payload["child_task_id"] == "TASK-011"
+    assert "auth API" in payload["reason"]

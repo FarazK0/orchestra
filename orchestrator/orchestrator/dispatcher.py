@@ -34,11 +34,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .context_packager import create_run
-from .dag import get_ready_successors, get_running_conflicts
+from .dag import TERMINAL_STATUSES, get_ready_successors, get_running_conflicts
 from .db import AuditRow, Event, Run, Task, get_engine, get_session_factory
 from .scheduler import Scheduler
 from .state_machine import transition
-from .streams import STREAM_KEY, StreamConsumer, StreamPublisher
+from .streams import ROOT_STREAM_KEY, STREAM_KEY, StreamConsumer, StreamPublisher
 
 log = logging.getLogger(__name__)
 
@@ -282,6 +282,9 @@ class Dispatcher:
             session.commit()  # persist any rejection events
             return
 
+        # Capture deps before commit so we don't need a lazy reload after expire.
+        child_deps = list(child.depends_on or [])
+
         assign_event = transition(session, child.id, "assigned", actor="dispatcher")
         session.commit()
 
@@ -297,6 +300,36 @@ class Dispatcher:
             child.id,
             task_id,
         )
+
+        # Trigger replanning if the child has pending dependencies; the root agent
+        # will decide whether any existing tasks need to be re-ordered or augmented.
+        if child_deps:
+            pending_count = sum(
+                1
+                for dep_id in child_deps
+                if (dep := session.get(Task, dep_id)) is not None
+                and dep.status not in TERMINAL_STATUSES
+            )
+            if pending_count >= 1:
+                self._publisher.publish(
+                    str(uuid.uuid4()),
+                    "PLAN_REPLAN_REQUESTED",
+                    child.id,
+                    {
+                        "trigger_task_id": task_id,
+                        "child_task_id": child.id,
+                        "reason": (
+                            f"Discovered child {child.id!r} has {pending_count} pending "
+                            "dependency task(s); plan ordering may need updating"
+                        ),
+                    },
+                    stream_key=ROOT_STREAM_KEY,
+                )
+                log.info(
+                    "Replan queued: child %s has %d pending dependencies",
+                    child.id,
+                    pending_count,
+                )
 
     def _on_task_completed(self, task_id: str, session: Session) -> None:
         """Write episode memory, advance DAG successors, and unblock waiting parents."""
