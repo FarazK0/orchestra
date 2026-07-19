@@ -96,6 +96,9 @@ class LLMClient:
                     cost = _cost(self.model, in_tok, out_tok)
                     run.cost_usd = float(run.cost_usd or 0) + cost
                     session.flush()
+                    from orchestrator.orchestrator.metrics import task_cost_usd
+
+                    task_cost_usd.labels(agent_id=run.agent_id, model=self.model).inc(cost)
             except Exception:
                 pass
 

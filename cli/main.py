@@ -776,7 +776,7 @@ def audit(
 
     typer.echo(f"\n  {_b(task_id)} — {len(rows)} audit row(s)\n")
     typer.echo(f"  {'TIMESTAMP':<26} {'ACTION':<30} DETAILS")
-    typer.echo(f"  {'-'*25:<26} {'-'*29:<30} {'─'*40}")
+    typer.echo(f"  {'-' * 25:<26} {'-' * 29:<30} {'─' * 40}")
     for row in rows:
         ts = row["timestamp"][:19].replace("T", " ")
         action = row["action"][:30]

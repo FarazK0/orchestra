@@ -99,8 +99,11 @@ orchestra/
 - The developer works on Windows + WSL2. Everything must run inside WSL2/Docker;
   do not assume Docker Desktop paths. Ports: Postgres 5433 on host (5432 is often
   taken), gateway 8081, orchestrator 8080, Redis 6380 (host) mapped from container 6379.
+  Observability (Phase 3): Jaeger UI 16686, OTLP HTTP 4318, Prometheus 9090, Grafana 3000.
 - `REDIS_URL=redis://localhost:6380` — set in `.env`; used by `StreamPublisher` /
   `StreamConsumer` in `orchestrator/orchestrator/streams.py`.
+- `OTLP_ENDPOINT=http://localhost:4318` — set in `.env` to activate distributed traces
+  (Jaeger). Leave empty to skip tracing; Prometheus metrics are always active at `/metrics`.
 - Postgres data is persisted at `~/.orchestra/pgdata` (WSL2 bind mount, not a named
   volume) to avoid the 128 MB Docker Desktop VHD limit.
 

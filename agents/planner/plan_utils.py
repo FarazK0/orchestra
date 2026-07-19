@@ -79,6 +79,7 @@ Rules:
 """
 )
 
+
 def topo_sort(tasks: list[dict]) -> list[dict]:
     """Return tasks in an order where every task appears after its dependencies."""
     by_title = {t["title"]: t for t in tasks}

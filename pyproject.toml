@@ -16,6 +16,11 @@ dependencies = [
     "anthropic>=0.40",
     "PyJWT>=2.8",
     "redis[hiredis]>=5.0",
+    "opentelemetry-sdk>=1.24",
+    "opentelemetry-exporter-otlp-proto-http>=1.24",
+    "opentelemetry-instrumentation-fastapi>=0.45b0",
+    "prometheus-client>=0.20",
+    "prometheus-fastapi-instrumentator>=6.1",
 ]
 
 [project.scripts]

@@ -103,6 +103,15 @@ def validate_task(
     pytest_rc = results["pytest"]["returncode"]
     passed = results["ruff"]["returncode"] == 0 and pytest_rc in (0, 5)
 
+    try:
+        from .metrics import validator_results_total
+
+        validator_results_total.labels(
+            result="passed" if passed else "failed", owner=task.owner
+        ).inc()
+    except Exception:
+        pass
+
     _finalize(session, task_id, passed=passed, actor=actor, results=results)
     return {**results, "passed": passed}
 

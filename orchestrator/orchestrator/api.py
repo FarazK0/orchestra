@@ -15,12 +15,14 @@ POST /tasks/{task_id}/validate     run ruff + pytest and transition completed ->
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Generator
 
 import redis.exceptions
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -36,12 +38,33 @@ from .db import Event as EventORM
 from .db import Run as RunORM
 from .db import Task as TaskORM
 from .db import get_engine, get_session_factory
+from .metrics import human_queue_latency_seconds, tasks_total
 from .state_machine import InvalidTransitionError, TaskNotFoundError, transition
 from .streams import StreamPublisher
+from .telemetry import setup_tracing
 
 log = logging.getLogger(__name__)
 
-app = FastAPI(title="Orchestra Orchestrator", version="0.1.0")
+_metrics_exposed = False
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # expose() adds the /metrics route — guarded so it only runs once across
+    # multiple TestClient contexts in the same test process.
+    global _metrics_exposed
+    if not _metrics_exposed:
+        setup_tracing(app, "orchestrator")
+        _instrumentator.expose(app)
+        _metrics_exposed = True
+    yield
+
+
+app = FastAPI(title="Orchestra Orchestrator", version="0.1.0", lifespan=_lifespan)
+
+# instrument() adds Prometheus middleware — must run before the app's middleware
+# stack is built (i.e., before the first request / TestClient.__enter__).
+_instrumentator = Instrumentator().instrument(app)
 
 # ---------------------------------------------------------------------------
 # Best-effort Redis event publish
@@ -253,7 +276,19 @@ def transition_task(
     except InvalidTransitionError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     bg.add_task(_try_publish, str(event.event_id), event.event_type, task_id, event.payload)
-    return TaskSchema.model_validate(session.get(TaskORM, task_id))
+    task = session.get(TaskORM, task_id)
+    tasks_total.labels(new_status=body.new_status, owner=task.owner).inc()
+    if body.new_status == "merged":
+        validated_event = session.execute(
+            select(EventORM)
+            .where(EventORM.task_id == task_id, EventORM.event_type == "TASK_VALIDATED")
+            .order_by(EventORM.emitted_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if validated_event is not None:
+            latency = (datetime.now(timezone.utc) - validated_event.emitted_at).total_seconds()
+            human_queue_latency_seconds.labels(owner=task.owner).observe(latency)
+    return TaskSchema.model_validate(task)
 
 
 @app.get("/tasks/{task_id}/events", response_model=list[EventSchema])

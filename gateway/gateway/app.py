@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import subprocess
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Generator
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -48,7 +50,24 @@ from .permissions import (
     verify_capability_header,
 )
 
-app = FastAPI(title="Orchestra Tool Gateway", version="0.1.0")
+
+_metrics_exposed = False
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    global _metrics_exposed
+    if not _metrics_exposed:
+        from orchestrator.orchestrator.telemetry import setup_tracing
+
+        setup_tracing(app, "gateway")
+        _instrumentator.expose(app)
+        _metrics_exposed = True
+    yield
+
+
+app = FastAPI(title="Orchestra Tool Gateway", version="0.1.0", lifespan=_lifespan)
+_instrumentator = Instrumentator().instrument(app)
 
 # ---------------------------------------------------------------------------
 # DB session dependency (same pattern as orchestrator/api.py)

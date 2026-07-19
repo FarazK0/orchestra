@@ -1,0 +1,10 @@
+apiVersion: 1
+
+providers:
+  - name: Orchestra
+    folder: Orchestra
+    type: file
+    disableDeletion: true
+    editable: false
+    options:
+      path: /etc/grafana/dashboards
