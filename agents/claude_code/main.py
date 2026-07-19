@@ -124,12 +124,37 @@ After running this command: stop all work, do not write more files, do not call 
 and exit. Orchestra will run the new task and restart you with the results.
 """
 
+    # Resumption context — prepended when this is a re-run after child task completion.
+    resumption_section = ""
+    if pkg.get("is_resumption"):
+        cp = pkg.get("checkpoint") or {}
+        child_outputs: list[dict] = pkg.get("child_outputs") or []
+        lines = ["## Resumption context", ""]
+        lines.append(
+            "You previously worked on this task and paused to let a child task complete."
+        )
+        if child_outputs:
+            completed = [
+                f"`{c['task_id']}` {c['title']} ({c['status']})" for c in child_outputs
+            ]
+            lines.append(f"Completed child tasks: {', '.join(completed)}")
+        lines += ["", "Your checkpoint when you paused:"]
+        if cp.get("summary"):
+            lines.append(f"  Summary: {cp['summary']}")
+        steps = cp.get("completed_steps") or []
+        if steps:
+            lines.append(f"  Completed steps: {', '.join(steps)}")
+        if cp.get("next_step"):
+            lines.append(f"  Next step: {cp['next_step']}")
+        lines += ["", "Continue from where you left off — do not repeat completed work.", ""]
+        resumption_section = "\n".join(lines) + "\n"
+
     return f"""\
 You are acting as {task_owner} for this project.
 You are working on a software development task in the Git repository at {repo_path}.
 Your work will be committed to branch `{branch}` (already checked out for you).
 
-## Task
+{resumption_section}## Task
 
 {task["title"]}
 

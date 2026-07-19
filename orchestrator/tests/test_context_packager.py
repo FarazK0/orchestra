@@ -220,3 +220,77 @@ def test_create_run_creates_store_dir(session, tmp_path):
 def test_create_run_raises_for_unknown_task(session, tmp_path):
     with pytest.raises(TaskNotFoundError):
         create_run(session, "TASK-999", "backend-agent", tmp_path, tmp_path / "store")
+
+
+# ---------------------------------------------------------------------------
+# Resumption context (Stage 3)
+# ---------------------------------------------------------------------------
+
+
+def test_build_resumption_fields_on_first_run(session, tmp_path):
+    make_task(session, "TASK-810", status="assigned")
+    session.flush()
+
+    pkg = build_context_package(session, "TASK-810", tmp_path)
+
+    assert pkg["is_resumption"] is False
+    assert pkg["checkpoint"] is None
+    assert pkg["child_outputs"] == []
+
+
+def test_build_resumption_fields_on_resumed_task(session, tmp_path):
+    from datetime import datetime, timezone
+
+    from orchestrator.orchestrator.db import Task
+
+    now = datetime.now(timezone.utc)
+    checkpoint = {"summary": "done step 1", "completed_steps": ["step 1"], "next_step": "step 2"}
+    parent = Task(
+        id="TASK-820",
+        schema_version=1,
+        title="Parent task",
+        owner="backend-agent",
+        status="assigned",
+        depends_on=[],
+        inputs=[],
+        outputs=[],
+        acceptance=[],
+        risk_tier=1,
+        budget={"tokens": 100_000, "wall_clock_min": 30, "retries": 2},
+        checkpoint=checkpoint,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(parent)
+
+    child = Task(
+        id="TASK-821",
+        schema_version=1,
+        title="Child migration task",
+        owner="backend-agent",
+        status="completed",
+        depends_on=[],
+        inputs=[],
+        outputs=["db/migration.sql"],
+        acceptance=[],
+        risk_tier=1,
+        budget={"tokens": 100_000, "wall_clock_min": 30, "retries": 2},
+        parent_task_id="TASK-820",
+        spawn_depth=1,
+        blocked_by=[],
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(child)
+    session.flush()
+
+    pkg = build_context_package(session, "TASK-820", tmp_path)
+
+    assert pkg["is_resumption"] is True
+    assert pkg["checkpoint"] == checkpoint
+    assert len(pkg["child_outputs"]) == 1
+    co = pkg["child_outputs"][0]
+    assert co["task_id"] == "TASK-821"
+    assert co["title"] == "Child migration task"
+    assert co["status"] == "completed"
+    assert "db/migration.sql" in co["outputs"]

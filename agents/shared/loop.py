@@ -209,10 +209,39 @@ GATEWAY_TOOLS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 
+def _format_resumption_section(pkg: dict) -> list[str]:
+    """Return lines for the resumption preamble, or empty list for first-run tasks."""
+    if not pkg.get("is_resumption"):
+        return []
+    cp = pkg.get("checkpoint") or {}
+    child_outputs: list[dict] = pkg.get("child_outputs") or []
+
+    lines = ["## Resumption context", ""]
+    lines.append(
+        "You previously worked on this task and paused to let a child task complete."
+    )
+
+    if child_outputs:
+        completed = [f"`{c['task_id']}` {c['title']} ({c['status']})" for c in child_outputs]
+        lines.append(f"Completed child tasks: {', '.join(completed)}")
+
+    lines += ["", "Your checkpoint when you paused:"]
+    if cp.get("summary"):
+        lines.append(f"  Summary: {cp['summary']}")
+    steps = cp.get("completed_steps") or []
+    if steps:
+        lines.append(f"  Completed steps: {', '.join(steps)}")
+    if cp.get("next_step"):
+        lines.append(f"  Next step: {cp['next_step']}")
+    lines += ["", "Continue from where you left off — do not repeat completed work.", ""]
+    return lines
+
+
 def format_context_package(pkg: dict) -> str:
     """Render a context package dict as the agent's opening user message."""
     task = pkg["task"]
-    lines: list[str] = [
+    lines: list[str] = _format_resumption_section(pkg)
+    lines += [
         f"## Task: {task['title']}",
         "",
         "### Acceptance Criteria",
