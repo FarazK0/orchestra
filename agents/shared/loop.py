@@ -217,9 +217,7 @@ def _format_resumption_section(pkg: dict) -> list[str]:
     child_outputs: list[dict] = pkg.get("child_outputs") or []
 
     lines = ["## Resumption context", ""]
-    lines.append(
-        "You previously worked on this task and paused to let a child task complete."
-    )
+    lines.append("You previously worked on this task and paused to let a child task complete.")
 
     if child_outputs:
         completed = [f"`{c['task_id']}` {c['title']} ({c['status']})" for c in child_outputs]

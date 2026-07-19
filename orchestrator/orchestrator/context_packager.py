@@ -222,9 +222,9 @@ def build_context_package(
     is_resumption = task.checkpoint is not None
     child_outputs: list[dict] = []
     if is_resumption:
-        children = session.execute(
-            select(Task).where(Task.parent_task_id == task_id)
-        ).scalars().all()
+        children = (
+            session.execute(select(Task).where(Task.parent_task_id == task_id)).scalars().all()
+        )
         child_outputs = [
             {
                 "task_id": c.id,

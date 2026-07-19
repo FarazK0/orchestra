@@ -130,13 +130,9 @@ and exit. Orchestra will run the new task and restart you with the results.
         cp = pkg.get("checkpoint") or {}
         child_outputs: list[dict] = pkg.get("child_outputs") or []
         lines = ["## Resumption context", ""]
-        lines.append(
-            "You previously worked on this task and paused to let a child task complete."
-        )
+        lines.append("You previously worked on this task and paused to let a child task complete.")
         if child_outputs:
-            completed = [
-                f"`{c['task_id']}` {c['title']} ({c['status']})" for c in child_outputs
-            ]
+            completed = [f"`{c['task_id']}` {c['title']} ({c['status']})" for c in child_outputs]
             lines.append(f"Completed child tasks: {', '.join(completed)}")
         lines += ["", "Your checkpoint when you paused:"]
         if cp.get("summary"):

@@ -21,11 +21,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .db import AuditRow, Event, Task
+from .metrics import (
+    spawn_depth_histogram,
+    task_discovery_rejected_total,
+    tasks_blocked_total,
+    tasks_discovered_total,
+    tasks_resumed_total,
+)
 from .state_machine import transition
 
 log = logging.getLogger(__name__)
 
 MAX_SPAWN_DEPTH: int = int(os.getenv("ORCHESTRA_MAX_SPAWN_DEPTH", "5"))
+MAX_BLOCKED_BY: int = 10
 
 
 def _next_task_id(session: Session) -> str:
@@ -84,6 +92,17 @@ class Scheduler:
             )
             return None
 
+        # 1b. Fan-out cap: prevent a single parent from accumulating unbounded blockers
+        if len(parent.blocked_by or []) >= MAX_BLOCKED_BY:
+            log.warning(
+                "TASK_DISCOVERED: parent %s blocked_by count %d >= MAX_BLOCKED_BY %d; rejecting",
+                parent_task_id,
+                len(parent.blocked_by),
+                MAX_BLOCKED_BY,
+            )
+            self._emit_rejection(session, parent_task_id, "max_blocked_by_exceeded", reason)
+            return None
+
         # 2. Depth guard
         if parent.spawn_depth >= MAX_SPAWN_DEPTH:
             log.warning(
@@ -94,15 +113,19 @@ class Scheduler:
             self._emit_rejection(session, parent_task_id, "max_spawn_depth_exceeded", reason)
             return None
 
-        # 3. Duplicate guard: non-cancelled child with same title under this parent
-        existing = session.execute(
-            select(Task).where(
-                Task.parent_task_id == parent_task_id,
-                Task.title == title,
-                Task.status != "cancelled",
+        # 3. Duplicate guard: normalized title match among non-cancelled children
+        title_norm = title.strip().lower()
+        siblings = (
+            session.execute(
+                select(Task).where(
+                    Task.parent_task_id == parent_task_id,
+                    Task.status != "cancelled",
+                )
             )
-        ).scalar_one_or_none()
-        if existing is not None:
+            .scalars()
+            .all()
+        )
+        if any(s.title.strip().lower() == title_norm for s in siblings):
             log.warning(
                 "TASK_DISCOVERED: duplicate title %r under parent %s; rejecting",
                 title,
@@ -184,6 +207,9 @@ class Scheduler:
         parent.checkpoint = checkpoint
         session.flush()
 
+        tasks_discovered_total.inc()
+        tasks_blocked_total.inc()
+        spawn_depth_histogram.observe(child.spawn_depth)
         log.info(
             "Task discovered: created child %s (depth=%d), blocked parent %s",
             child_id,
@@ -227,6 +253,7 @@ class Scheduler:
             return []
 
         # All children done — resume parent
+        tasks_resumed_total.inc()
         transition(session, parent.id, "assigned", actor="scheduler")
         log.info("Parent %s unblocked by child %s; transitioned to assigned", parent.id, child_id)
         return [parent]
@@ -238,6 +265,7 @@ class Scheduler:
     def _emit_rejection(
         self, session: Session, parent_task_id: str, reason: str, detail: str
     ) -> None:
+        task_discovery_rejected_total.labels(reason=reason).inc()
         now = datetime.now(timezone.utc)
         ev = Event(
             event_id=uuid.uuid4(),

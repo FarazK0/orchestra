@@ -282,6 +282,7 @@ def test_create_run_child_token_narrowed_to_parent_scope(session, tmp_path):
         run = create_run(session, "TASK-851", "backend-agent", tmp_path, tmp_path / "store")
 
     import json
+
     pkg = json.loads((tmp_path / "store" / f"{run.run_id}.json").read_text())
     token = pkg["capability_token"]
     assert token != ""

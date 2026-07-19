@@ -485,9 +485,7 @@ def trigger_replan(body: ReplanRequest, bg: BackgroundTasks) -> dict:
         "reason": body.reason,
     }
     bg.add_task(_try_publish_replan, event_id, payload)
-    log.info(
-        "Replan queued: trigger=%s child=%s", body.trigger_task_id, body.child_task_id
-    )
+    log.info("Replan queued: trigger=%s child=%s", body.trigger_task_id, body.child_task_id)
     return {"status": "queued", "event_id": event_id}
 
 

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from orchestrator.orchestrator.db import AuditRow, Event, Task
-from orchestrator.orchestrator.scheduler import MAX_SPAWN_DEPTH, Scheduler
+from orchestrator.orchestrator.scheduler import MAX_BLOCKED_BY, MAX_SPAWN_DEPTH, Scheduler
 from orchestrator.tests.conftest import make_task
 
 _DEFAULT_BUDGET = {"tokens": 100_000, "wall_clock_min": 30, "retries": 2}
@@ -98,6 +98,47 @@ def test_discovery_writes_audit_for_block(session):
     audits = session.query(AuditRow).filter(AuditRow.task_id == "TASK-S02").all()
     actions = [a.action for a in audits]
     assert any("blocked" in a for a in actions)
+
+
+# ---------------------------------------------------------------------------
+# Rejection: max_blocked_by exceeded
+# ---------------------------------------------------------------------------
+
+
+def test_discovery_rejected_on_max_blocked_by(session):
+    now = datetime.now(timezone.utc)
+    fake_blocker_ids = [f"TASK-BL{i:02d}" for i in range(MAX_BLOCKED_BY)]
+    parent = Task(
+        id="TASK-SBY1",
+        schema_version=1,
+        title="Overloaded parent",
+        owner="backend-agent",
+        status="running",
+        depends_on=[],
+        inputs=[],
+        outputs=[],
+        acceptance=[],
+        risk_tier=1,
+        budget=_DEFAULT_BUDGET,
+        spawn_depth=0,
+        blocked_by=fake_blocker_ids,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(parent)
+    session.flush()
+
+    ev = _make_discovery_event(session, "TASK-SBY1")
+    result = Scheduler().handle_task_discovered(session, ev)
+    assert result is None
+
+    rejection = (
+        session.query(Event)
+        .filter(Event.task_id == "TASK-SBY1", Event.event_type == "TASK_DISCOVERY_REJECTED")
+        .first()
+    )
+    assert rejection is not None
+    assert rejection.payload["reason"] == "max_blocked_by_exceeded"
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +292,7 @@ def test_discovery_rejected_when_outputs_outside_parent_scope(session):
         status="running",
         depends_on=[],
         inputs=[],
-        outputs=["app/"],   # parent can only write to app/
+        outputs=["app/"],  # parent can only write to app/
         acceptance=[],
         risk_tier=1,
         budget=_DEFAULT_BUDGET,

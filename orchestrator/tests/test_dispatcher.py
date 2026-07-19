@@ -510,11 +510,10 @@ def test_on_task_discovered_triggers_replan_when_child_has_pending_dep(
 
     # PLAN_REPLAN_REQUESTED must be in the root:requests stream
     root_messages = dispatcher._publisher._r.xrange(ROOT_STREAM_KEY)
-    replan_msgs = [
-        m for _, m in root_messages if m.get("event_type") == "PLAN_REPLAN_REQUESTED"
-    ]
+    replan_msgs = [m for _, m in root_messages if m.get("event_type") == "PLAN_REPLAN_REQUESTED"]
     assert len(replan_msgs) == 1
     import json as _json
+
     pl = _json.loads(replan_msgs[0]["payload"])
     assert pl["trigger_task_id"] == "TASK-DR2"
     assert "child_task_id" in pl
@@ -533,9 +532,7 @@ def test_on_task_discovered_no_replan_when_child_has_no_deps(
             dispatcher._on_task_discovered("TASK-DN1", session)
 
     root_messages = dispatcher._publisher._r.xrange(ROOT_STREAM_KEY)
-    replan_msgs = [
-        m for _, m in root_messages if m.get("event_type") == "PLAN_REPLAN_REQUESTED"
-    ]
+    replan_msgs = [m for _, m in root_messages if m.get("event_type") == "PLAN_REPLAN_REQUESTED"]
     assert len(replan_msgs) == 0
 
 
