@@ -31,7 +31,9 @@ from schemas.models import Task as TaskSchema
 from schemas.models import TaskBudget
 
 from .db import AgentMemory as AgentMemoryORM
+from .db import AuditRow as AuditRowORM
 from .db import Event as EventORM
+from .db import Run as RunORM
 from .db import Task as TaskORM
 from .db import get_engine, get_session_factory
 from .state_machine import InvalidTransitionError, TaskNotFoundError, transition
@@ -340,6 +342,59 @@ def validate_task_endpoint(
         task=TaskSchema.model_validate(session.get(TaskORM, task_id)),
         validation=results,
     )
+
+
+@app.get("/tasks/{task_id}/runs")
+def list_task_runs(task_id: str, session: SessionDep) -> list[dict]:
+    """Return run records for a task, newest first."""
+    _task_or_404(session, task_id)
+    rows = (
+        session.execute(
+            select(RunORM).where(RunORM.task_id == task_id).order_by(RunORM.started_at.desc())
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "run_id": str(r.run_id),
+            "agent_id": r.agent_id,
+            "branch": r.branch,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            "result": r.result,
+            "log_path": r.log_path,
+            "tokens_used": r.tokens_used,
+            "cost_usd": float(r.cost_usd),
+        }
+        for r in rows
+    ]
+
+
+@app.get("/tasks/{task_id}/audit")
+def list_task_audit(task_id: str, session: SessionDep) -> list[dict]:
+    """Return the 50 most recent audit rows for a task, newest first."""
+    _task_or_404(session, task_id)
+    rows = (
+        session.execute(
+            select(AuditRowORM)
+            .where(AuditRowORM.task_id == task_id)
+            .order_by(AuditRowORM.timestamp.desc())
+            .limit(50)
+        )
+        .scalars()
+        .all()
+    )
+    return [
+        {
+            "id": str(r.id),
+            "timestamp": r.timestamp.isoformat(),
+            "actor": r.actor,
+            "action": r.action,
+            "details": r.details,
+        }
+        for r in rows
+    ]
 
 
 @app.get("/agent-memories", response_model=list[AgentMemorySchema])

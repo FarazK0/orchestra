@@ -78,6 +78,8 @@ Map natural language to commands using this table. Run the command, print it, pr
 | show logs / tail logs | `tail -50 /tmp/orchestra/logs/dispatcher.log /tmp/orchestra/logs/root-agent.log` |
 | show memory / agent memory | `uv run python -m cli.main memory list` |
 | show memory for \<agent\> | `uv run python -m cli.main memory list --agent <agent>` |
+| tail task N / show logs for task N | `uv run python -m cli.main tail TASK-00N` |
+| audit task N / what has task N done | `uv run python -m cli.main audit TASK-00N` |
 | what should I do next? | analyse task states (see suggestions logic below) and recommend |
 | stop services | show PIDs from `/tmp/orchestra/pids/` and the `make stop` command |
 | wipe / reset / clean db | **show commands only, do not run** (see destructive ops below) |

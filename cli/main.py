@@ -12,8 +12,10 @@ review        Interactive approval loop: auto-validate and prompt for merge
 from __future__ import annotations
 
 import os
+import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -675,6 +677,113 @@ def review(
 
     except KeyboardInterrupt:
         typer.echo("\n\n  Exiting review loop.")
+
+
+# ---------------------------------------------------------------------------
+# tail — stream agent log for a running (or finished) task
+# ---------------------------------------------------------------------------
+
+
+@app.command("tail")
+def tail(
+    task_id: str = typer.Argument(..., help="Task ID, e.g. TASK-006."),
+    lines: int = typer.Option(100, "--lines", "-n", help="Lines to show when task is finished."),
+) -> None:
+    """Stream the live agent log for a task.
+
+    \b
+    If the task is still running: follows the log in real time (Ctrl+C to stop).
+    If the task has finished: prints the last --lines lines and exits.
+    """
+    with _client() as c:
+        resp = c.get(f"/tasks/{task_id}/runs")
+    _handle_error(resp)
+    runs = resp.json()
+
+    if not runs:
+        typer.echo(f"No runs found for {task_id}.", err=True)
+        raise typer.Exit(1)
+
+    latest = runs[0]
+    log_path = latest.get("log_path")
+    if not log_path:
+        typer.echo(f"No log file recorded for {task_id} run {latest['run_id'][:8]}.", err=True)
+        raise typer.Exit(1)
+
+    p = Path(log_path)
+    if not p.exists():
+        typer.echo(f"Log file not found: {log_path}", err=True)
+        raise typer.Exit(1)
+
+    is_running = latest.get("finished_at") is None
+    typer.echo(
+        f"  {_b(task_id)}  run:{latest['run_id'][:8]}  "
+        f"{'[running — Ctrl+C to stop]' if is_running else '[finished]'}"
+    )
+    typer.echo(f"  {_d(log_path)}\n")
+
+    if is_running:
+        # Follow mode: stream new bytes as they arrive.
+        try:
+            with p.open("r") as f:
+                # Print what's already there.
+                sys.stdout.write(f.read())
+                sys.stdout.flush()
+                # Then follow new output.
+                while True:
+                    chunk = f.read(4096)
+                    if chunk:
+                        sys.stdout.write(chunk)
+                        sys.stdout.flush()
+                    else:
+                        # Re-check if run finished.
+                        with _client() as c:
+                            r = c.get(f"/tasks/{task_id}/runs")
+                        if r.is_success and r.json() and r.json()[0].get("finished_at"):
+                            # Drain remaining output.
+                            sys.stdout.write(f.read())
+                            sys.stdout.flush()
+                            break
+                        time.sleep(1)
+        except KeyboardInterrupt:
+            typer.echo("\n")
+    else:
+        # Static mode: print last N lines.
+        content = p.read_text(encoding="utf-8", errors="replace")
+        all_lines = content.splitlines()
+        for line in all_lines[-lines:]:
+            typer.echo(line)
+
+
+# ---------------------------------------------------------------------------
+# audit — show gateway audit trail for a task
+# ---------------------------------------------------------------------------
+
+
+@app.command("audit")
+def audit(
+    task_id: str = typer.Argument(..., help="Task ID, e.g. TASK-006."),
+) -> None:
+    """Show the gateway audit trail for a task (most recent first)."""
+    with _client() as c:
+        resp = c.get(f"/tasks/{task_id}/audit")
+    _handle_error(resp)
+    rows = resp.json()
+
+    if not rows:
+        typer.echo(f"No audit rows found for {task_id}.")
+        return
+
+    typer.echo(f"\n  {_b(task_id)} — {len(rows)} audit row(s)\n")
+    typer.echo(f"  {'TIMESTAMP':<26} {'ACTION':<30} DETAILS")
+    typer.echo(f"  {'-'*25:<26} {'-'*29:<30} {'─'*40}")
+    for row in rows:
+        ts = row["timestamp"][:19].replace("T", " ")
+        action = row["action"][:30]
+        details_str = str(row.get("details", {}))
+        if len(details_str) > 80:
+            details_str = details_str[:77] + "..."
+        typer.echo(f"  {ts:<26} {action:<30} {_d(details_str)}")
 
 
 # ---------------------------------------------------------------------------

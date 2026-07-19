@@ -118,6 +118,7 @@ class Dispatcher:
             )
             return  # _recover_stale will retry once conflicts clear
         run = create_run(session, task_id, task.owner, self._repo_path, self._store_dir)
+        run.log_path = str(self._store_dir / "logs" / f"{run.run_id}.log")
         transition(session, task_id, "running", actor="dispatcher")
         session.commit()
         self._launch_agent(run)
@@ -138,6 +139,7 @@ class Dispatcher:
                 self._store_dir,
                 retry_count=task.retry_count,
             )
+            run.log_path = str(self._store_dir / "logs" / f"{run.run_id}.log")
             event = transition(session, task_id, "running", actor="dispatcher")
             session.commit()
             self._publisher.publish(
@@ -278,6 +280,9 @@ class Dispatcher:
             module = "agents.claude_code.main"
         else:
             module = _AGENT_MODULES.get(run.agent_id, "agents.backend.main")
+        log_path = run.log_path or str(self._store_dir / "logs" / f"{run.run_id}.log")
+        Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+        log_file = open(log_path, "w")  # noqa: SIM115
         subprocess.Popen(
             [
                 sys.executable,
@@ -289,9 +294,11 @@ class Dispatcher:
                 str(run.run_id),
                 "--repo",
                 str(self._repo_path),
-            ]
+            ],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
         )
-        log.info("Launched %s for run %s (task %s)", module, run.run_id, run.task_id)
+        log.info("Launched %s for run %s (task %s) log=%s", module, run.run_id, run.task_id, log_path)
 
     # ------------------------------------------------------------------
     # Stale-task recovery

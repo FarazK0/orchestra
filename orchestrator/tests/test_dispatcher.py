@@ -129,7 +129,8 @@ def test_on_task_assigned_creates_run_and_launches_agent(
     mock_popen.assert_called_once()
     cmd = mock_popen.call_args[0][0]
     assert "-m" in cmd
-    assert "agents.backend.main" in cmd
+    # Default AGENT_TYPE=claude-code routes all specialist owners to the claude CLI wrapper.
+    assert "agents.claude_code.main" in cmd
 
     with session_factory() as s:
         task = s.get(Task, task_id)

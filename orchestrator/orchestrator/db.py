@@ -86,6 +86,7 @@ class Run(Base):
     cost_usd: Mapped[float] = mapped_column(
         Numeric(precision=10, scale=6), nullable=False, default=0
     )
+    log_path: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AuditRow(Base):
