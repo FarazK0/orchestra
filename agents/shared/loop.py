@@ -164,6 +164,9 @@ GATEWAY_TOOLS: list[dict[str, Any]] = [
             "Use when you encounter work that MUST happen before you can continue "
             "and is outside your write scope. Pauses this task, creates the required "
             "task, and resumes you with the results after it completes. "
+            "BEFORE calling this: check the '## Current task plan' section in your context. "
+            "If the work you need is already listed there (even as 'created' or 'assigned'), "
+            "do NOT call discover_task — Orchestra will run that task when ready. "
             "Do NOT use for work within your scope — write it yourself. "
             "If a write_artifact call returns 403, use this tool instead of retrying."
         ),
@@ -294,6 +297,25 @@ def format_context_package(pkg: dict) -> str:
             lines.append("#### Shared project conventions")
             for sk in mem["shared_skills"]:
                 lines += [sk, ""]
+
+    # DAG summary: show non-terminal tasks so the agent checks before calling discover_task.
+    current_dag = pkg.get("current_dag", [])
+    task_id_self = pkg.get("task_id", "")
+    active_dag = [t for t in current_dag if t.get("id") != task_id_self]
+    if active_dag:
+        lines.append("### Current task plan (check before calling discover_task)")
+        lines.append(
+            "Before calling `discover_task`, check if the work is already planned below.\n"
+            "If a task covers the outputs you need — even with status 'created' — do NOT call\n"
+            "`discover_task`. Orchestra will run it when its dependencies are satisfied."
+        )
+        lines.append("")
+        lines.append("| ID | Status | Owner | Outputs |")
+        lines.append("|----|--------|-------|---------|")
+        for dt in active_dag:
+            outs = ", ".join(dt.get("outputs", [])[:3]) or "(none)"
+            lines.append(f"| {dt['id']} | {dt['status']} | {dt['owner']} | {outs} |")
+        lines.append("")
 
     instr = pkg["agent_instructions"]
     lines += [

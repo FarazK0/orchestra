@@ -3,7 +3,7 @@
 The root agent subscribes to the ``root:requests`` Redis stream.  When a change
 request arrives (submitted via ``orchctl request``), it:
 
-  1. Reads a snapshot of the managed repo (file tree + recent git log).
+  1. Iteratively explores the managed repo to build focused planning context.
   2. Calls the planner (claude CLI or LLM, depending on AGENT_TYPE) to decompose
      the change into tasks.
   3. Creates the tasks in the orchestrator.
@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -31,7 +32,12 @@ import httpx
 import typer
 from dotenv import load_dotenv
 
-from agents.planner.plan_utils import CHANGE_REQUEST_SYSTEM_PROMPT, parse_task_plan, topo_sort
+from agents.planner.plan_utils import (
+    CHANGE_REQUEST_SYSTEM_PROMPT,
+    build_snapshot,
+    parse_task_plan,
+    topo_sort,
+)
 from agents.shared.llm import LLMClient
 from orchestrator.orchestrator.db import get_engine, get_session_factory
 from orchestrator.orchestrator.streams import ROOT_STREAM_KEY, StreamConsumer, StreamPublisher
@@ -44,30 +50,12 @@ log = logging.getLogger(__name__)
 app = typer.Typer(name="root-agent", add_completion=False)
 
 # ---------------------------------------------------------------------------
-# Project state snapshot
+# Project state helpers
 # ---------------------------------------------------------------------------
 
 
-def _project_snapshot(repo_path: Path) -> str:
-    """Return a compact text snapshot of the managed repo for the planner prompt."""
-    lines: list[str] = []
-
-    # Recent git log
-    try:
-        result = subprocess.run(
-            ["git", "log", "--oneline", "-20"],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            lines.append("## Recent git history")
-            lines.append(result.stdout.strip())
-    except Exception:
-        pass
-
-    # File tree (non-hidden, non-pycache, max 100 files)
+def _list_repo_files(repo_path: Path) -> list[str]:
+    """Return sorted list of all repo files, excluding build artifacts."""
     try:
         result = subprocess.run(
             [
@@ -96,14 +84,161 @@ def _project_snapshot(repo_path: Path) -> str:
             text=True,
             timeout=10,
         )
-        if result.returncode == 0:
-            files = sorted(result.stdout.splitlines())[:100]
-            lines.append("\n## Current file tree")
-            lines.append("\n".join(files))
+        return sorted(result.stdout.splitlines()) if result.returncode == 0 else []
+    except Exception:
+        return []
+
+
+def _discover_context(
+    repo_path: Path,
+    description: str,
+    agent_type: str,
+    max_iterations: int = 3,
+) -> tuple[str, list[str]]:
+    """Iterative LLM-based file discovery before planning.
+
+    Shows the full file tree to the LLM, which requests specific files to read.
+    Returns (snapshot_string, list_of_read_paths). Falls back to build_snapshot()
+    on empty repo or LLM failure so the request always continues.
+    """
+    all_files = _list_repo_files(repo_path)
+
+    if not all_files:
+        log.info("Discovery loop: no files found, skipping (fresh repo or empty)")
+        return build_snapshot(repo_path), []
+
+    read_files: dict[str, str] = {}
+
+    for iteration in range(max_iterations):
+        file_tree_str = "\n".join(all_files)
+        already_read_str = ""
+        if read_files:
+            parts = [f"### {path}\n```\n{content}\n```" for path, content in read_files.items()]
+            already_read_str = "\n\n".join(parts)
+
+        prompt = (
+            f"You are exploring a codebase before planning a change.\n"
+            f"Change request: {description}\n\n"
+            f"Complete file tree:\n{file_tree_str}\n\n"
+        )
+        if already_read_str:
+            prompt += f"Files you have read so far:\n{already_read_str}\n\n"
+
+        prompt += (
+            "Choose ONE action (return ONLY the JSON, no explanation):\n"
+            '  {"action": "read", "files": ["<path>", ...]}   <- up to 5 paths from the tree\n'
+            '  {"action": "done"}\n\n'
+            "Stop when you have enough context to write specific output file paths."
+        )
+
+        raw = ""
+        try:
+            use_api = agent_type == "python" and os.getenv("ANTHROPIC_API_KEY", "").strip()
+            if use_api:
+                llm = LLMClient()
+                response = llm.call(
+                    messages=[{"role": "user", "content": prompt}],
+                    system="You are a codebase navigator. Return ONLY JSON.",
+                    run_id=None,
+                    session=None,
+                    max_tokens=200,
+                )
+                raw = response.content[0].text
+            else:
+                claude_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+                proc = subprocess.run(
+                    ["claude", "--dangerously-skip-permissions", "-p", prompt],
+                    env=claude_env,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    stdin=subprocess.DEVNULL,
+                )
+                if proc.returncode != 0:
+                    log.warning(
+                        "Discovery iteration %d: claude exited %d; stopping",
+                        iteration + 1,
+                        proc.returncode,
+                    )
+                    break
+                raw = proc.stdout
+        except Exception as exc:
+            log.warning("Discovery iteration %d failed: %s", iteration + 1, exc)
+            break
+
+        # Parse the LLM response — strip fences and find the JSON object.
+        raw = raw.strip()
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
+        raw = re.sub(r"\s*```\s*$", "", raw, flags=re.MULTILINE)
+        raw = raw.strip()
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1:
+            log.warning("Discovery iteration %d: no JSON object found; stopping", iteration + 1)
+            break
+        try:
+            action_obj = json.loads(raw[start : end + 1])
+        except json.JSONDecodeError:
+            log.warning("Discovery iteration %d: JSON parse error; stopping", iteration + 1)
+            break
+
+        action = action_obj.get("action", "")
+        if action == "done":
+            log.info(
+                "Discovery done after %d iteration(s); read %d file(s)",
+                iteration + 1,
+                len(read_files),
+            )
+            break
+        elif action == "read":
+            requested = action_obj.get("files", [])[:5]
+            log.info("Discovery iteration %d: requesting %s", iteration + 1, requested)
+            for rel_path in requested:
+                clean = rel_path.lstrip("./")
+                abs_path = repo_path / clean
+                try:
+                    content = abs_path.read_text(encoding="utf-8")
+                    read_files[clean] = content[:4000]
+                except Exception:
+                    read_files[clean] = "(could not read)"
+        else:
+            log.warning(
+                "Discovery iteration %d: unknown action %r; stopping", iteration + 1, action
+            )
+            break
+
+    # Build snapshot string.
+    lines: list[str] = []
+
+    try:
+        git_result = subprocess.run(
+            ["git", "log", "--oneline", "-20"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if git_result.returncode == 0 and git_result.stdout.strip():
+            lines.append("## Recent git history")
+            lines.append(git_result.stdout.strip())
     except Exception:
         pass
 
-    return "\n".join(lines) if lines else "(project state unavailable)"
+    if read_files:
+        lines.append("\n## Files read during exploration")
+        for path, content in read_files.items():
+            lines.append(f"### {path}\n```\n{content}\n```")
+
+    remaining = [f for f in all_files if f.lstrip("./") not in read_files]
+    if remaining:
+        lines.append("\n## All other files (paths only)")
+        lines.append("\n".join(remaining))
+    else:
+        lines.append("\n## Current file tree")
+        lines.append("\n".join(all_files))
+
+    snapshot = "\n".join(lines) if lines else "(project state unavailable)"
+    return snapshot, list(read_files.keys())
 
 
 # ---------------------------------------------------------------------------
@@ -112,8 +247,9 @@ def _project_snapshot(repo_path: Path) -> str:
 
 
 def _fetch_existing_tasks(orch_url: str) -> str:
-    """Return a compact summary of all non-failed tasks for injection into the planner prompt."""
-    import httpx
+    """Return a two-section summary of tasks: in-flight (paths locked) and landed."""
+    _IN_FLIGHT = {"created", "assigned", "running", "completed", "validated"}
+    _LANDED = {"merged", "closed"}
 
     try:
         with httpx.Client(base_url=orch_url, timeout=10.0) as client:
@@ -125,24 +261,36 @@ def _fetch_existing_tasks(orch_url: str) -> str:
     if not isinstance(tasks, list) or not tasks:
         return ""
 
-    active_statuses = {
-        "created",
-        "assigned",
-        "running",
-        "completed",
-        "validated",
-        "merged",
-        "closed",
-    }
-    lines = []
+    in_flight_lines: list[str] = []
+    landed_lines: list[str] = []
     for t in tasks:
         status = t.get("status", "")
-        if status in active_statuses:
-            lines.append(f"  [{t['id']}] ({status}) {t['title']}")
+        if status not in _IN_FLIGHT and status not in _LANDED:
+            continue
+        outputs = t.get("outputs") or []
+        outputs_str = ", ".join(outputs[:4])
+        suffix = f"  ->  {outputs_str}" if outputs_str else ""
+        entry = f"  [{t['id']}] ({status})  {t['title']}{suffix}"
+        if status in _IN_FLIGHT:
+            in_flight_lines.append(entry)
+        else:
+            landed_lines.append(entry)
 
-    if not lines:
+    if not in_flight_lines and not landed_lines:
         return ""
-    return "## Existing tasks (do not re-create these)\n" + "\n".join(lines)
+
+    sections: list[str] = []
+    if in_flight_lines:
+        sections.append(
+            "## In-flight tasks — output paths currently locked"
+            " (do not assign new tasks to these paths)\n" + "\n".join(in_flight_lines)
+        )
+    if landed_lines:
+        sections.append(
+            "## Completed/landed tasks — for context only (paths are available for new work)\n"
+            + "\n".join(landed_lines)
+        )
+    return "\n\n".join(sections)
 
 
 def _decompose_with_claude(
@@ -196,6 +344,7 @@ def _decompose_with_llm(
 # Identity memory seeding
 # ---------------------------------------------------------------------------
 
+
 _ROLE_DESCRIPTIONS: dict[str, str] = {
     "claude-code-agent": (
         "You are the generalist engineer for this project. "
@@ -239,8 +388,6 @@ def _seed_identity(
     Skips if identity memory already exists and was updated after the
     10th-most-recent completed task for that agent (not yet stale).
     """
-    import httpx
-
     # Check staleness: does identity exist and is it fresh?
     try:
         with httpx.Client(base_url=orch_url, timeout=10.0) as client:
@@ -254,7 +401,6 @@ def _seed_identity(
         existing = []
 
     if existing:
-        # Count completed tasks for this agent since identity was last written.
         updated_at = existing[0].get("updated_at", "")
         try:
             with httpx.Client(base_url=orch_url, timeout=10.0) as client:
@@ -273,7 +419,7 @@ def _seed_identity(
                 return
         except Exception as exc:
             log.warning("Staleness check failed for %s: %s", agent_id, exc)
-            return  # Don't re-seed if we can't check
+            return
 
     content = (
         f"## Role\n{_role_for(agent_id)}\n\n"
@@ -347,6 +493,17 @@ def _seed_shared_conventions(
 # ---------------------------------------------------------------------------
 
 
+_CROSS_CUTTING_PATTERNS = [
+    "docker-compose",
+    ".env",
+    "Makefile",
+    "tailwind.config",
+    "next.config",
+    "postcss.config",
+    "tsconfig.json",
+]
+
+
 def _submit_tasks(
     plan: list[dict],
     orch_url: str,
@@ -354,10 +511,57 @@ def _submit_tasks(
     gateway_url: str = "http://localhost:8081",
     snapshot: str = "",
     description: str = "",
+    repo_path: Path | None = None,
 ) -> list[str]:
     """Create tasks, seed identity memory for each agent type, approve roots."""
     ordered = topo_sort(plan)
     title_to_id: dict[str, str] = {}
+
+    # Coverage gap warning: cross-cutting files mentioned in description but owned by no task.
+    all_outputs = {p for t in plan for p in (t.get("outputs") or [])}
+    uncovered = [
+        pat
+        for pat in _CROSS_CUTTING_PATTERNS
+        if pat in (description or "") and not any(pat in o or o in pat for o in all_outputs)
+    ]
+    if uncovered:
+        log.warning(
+            "Plan coverage gap — description mentions %s but no task owns them; "
+            "agents may write out-of-scope and get rejected",
+            uncovered,
+        )
+
+    # Size + breadth check.
+    repo_files = _list_repo_files(repo_path) if repo_path else []
+    oversized: list[str] = []
+    for t in plan:
+        too_many_criteria = len(t.get("acceptance") or []) > 5
+        too_many_outputs = len(t.get("outputs") or []) > 2
+        broad_dir = False
+        for output in t.get("outputs", []):
+            clean = output.lstrip("./")
+            if output.endswith("/") and clean and repo_files:
+                count = sum(1 for f in repo_files if f.lstrip("./").startswith(clean))
+                if count > 15:
+                    broad_dir = True
+                    log.warning(
+                        "Task %r: output %r covers %d existing files — flagging for approval",
+                        t["title"],
+                        output,
+                        count,
+                    )
+        if too_many_criteria or too_many_outputs or broad_dir:
+            oversized.append(t["title"])
+
+    needs_approval = bool(oversized)
+    if needs_approval:
+        log.warning(
+            "PLAN REQUIRES HUMAN REVIEW — the following tasks may be over-scoped "
+            "and have been held in 'created' state. Review with `orchctl list` then run:\n"
+            "  orchctl approve TASK-NNN   # repeat for each task you want to start\n"
+            "Oversized tasks flagged: %s",
+            oversized,
+        )
 
     with httpx.Client(base_url=orch_url, timeout=15.0) as client:
         for task_def in ordered:
@@ -379,21 +583,25 @@ def _submit_tasks(
             title_to_id[task_def["title"]] = created["id"]
             log.info("Created %s: %r [%s]", created["id"], created["title"], created["owner"])
 
-        # Approve root tasks (no depends_on) — dispatcher will launch them immediately.
-        for task_def in ordered:
-            if task_def.get("depends_on"):
-                continue
-            task_id = title_to_id[task_def["title"]]
-            resp = client.post(
-                f"/tasks/{task_id}/transition",
-                json={
-                    "new_status": "assigned",
-                    "actor": "root-agent",
-                    "payload": {"change_id": change_id},
-                },
-            )
-            resp.raise_for_status()
-            log.info("Approved %s -> assigned", task_id)
+        if needs_approval:
+            # Leave all tasks in 'created' — human must orchctl approve each one.
+            pass
+        else:
+            # Approve root tasks (no depends_on) — dispatcher will launch them immediately.
+            for task_def in ordered:
+                if task_def.get("depends_on"):
+                    continue
+                task_id = title_to_id[task_def["title"]]
+                resp = client.post(
+                    f"/tasks/{task_id}/transition",
+                    json={
+                        "new_status": "assigned",
+                        "actor": "root-agent",
+                        "payload": {"change_id": change_id},
+                    },
+                )
+                resp.raise_for_status()
+                log.info("Approved %s -> assigned", task_id)
 
     # Seed identity memory for each unique agent type in the plan.
     seen_agents: set[str] = set()
@@ -496,7 +704,7 @@ class RootAgent:
             "If no changes are needed, output an empty JSON array []."
         )
 
-        snapshot = _project_snapshot(self._repo)
+        snapshot = build_snapshot(self._repo)
         existing = _fetch_existing_tasks(self._orch_url)
         use_api = self._agent_type == "python" and os.getenv("ANTHROPIC_API_KEY", "").strip()
 
@@ -530,6 +738,7 @@ class RootAgent:
                 gateway_url=self._gateway_url,
                 snapshot=snapshot,
                 description=replan_description,
+                repo_path=self._repo,
             )
         except Exception as exc:
             log.error("Replan: task submission failed: %s", exc)
@@ -607,15 +816,18 @@ class RootAgent:
             else:
                 log.warning("spec_path %r not found in repo; ignoring", spec_path_str)
 
-        # Snapshot the project.
-        snapshot = _project_snapshot(self._repo)
+        # Iterative file discovery: show full tree, LLM requests relevant files.
+        snapshot, discovered_inputs = _discover_context(self._repo, description, self._agent_type)
+        log.info(
+            "Discovery complete: read %d file(s), snapshot %d chars",
+            len(discovered_inputs),
+            len(snapshot),
+        )
 
         # Fetch existing tasks so the planner can avoid re-creating closed work.
         existing_tasks = _fetch_existing_tasks(self._orch_url)
         if existing_tasks:
-            log.info(
-                "Injecting %d existing task(s) into planner context", existing_tasks.count("\n")
-            )
+            log.info("Injecting existing task context into planner (%d chars)", len(existing_tasks))
 
         # Decompose into tasks.
         use_api = self._agent_type == "python" and os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -640,6 +852,13 @@ class RootAgent:
 
         log.info("Plan for [%s]: %d tasks", change_id, len(plan))
 
+        # Merge discovery-read files into every task's inputs (Fix 5).
+        if discovered_inputs:
+            for task_def in plan:
+                existing_inputs = set(task_def.get("inputs") or [])
+                task_def["inputs"] = sorted(existing_inputs | set(discovered_inputs))
+            log.info("Merged %d discovery file(s) into task inputs", len(discovered_inputs))
+
         try:
             task_ids = _submit_tasks(
                 plan,
@@ -648,6 +867,7 @@ class RootAgent:
                 gateway_url=self._gateway_url,
                 snapshot=snapshot,
                 description=description,
+                repo_path=self._repo,
             )
             log.info("Dispatched %d tasks for change [%s]: %s", len(task_ids), change_id, task_ids)
         except Exception as exc:

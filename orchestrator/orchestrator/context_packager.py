@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -301,6 +302,60 @@ def create_run(
     run_id = uuid.uuid4()
     package = build_context_package(session, task_id, repo_path)
     package["run_id"] = str(run_id)
+
+    # Fix 7: inject compact DAG so agents know what other tasks exist before
+    # emitting TASK_DISCOVERED (prevents duplicate task creation).
+    _non_terminal = {"created", "assigned", "running", "completed", "validated"}
+    all_dag_tasks = session.execute(select(Task)).scalars().all()
+    package["current_dag"] = [
+        {
+            "id": t.id,
+            "title": t.title,
+            "status": t.status,
+            "owner": t.owner,
+            "outputs": (t.outputs or [])[:4],
+            "depends_on": t.depends_on or [],
+        }
+        for t in all_dag_tasks
+        if t.status in _non_terminal
+    ]
+
+    # Fix 8: replace main-HEAD input artifact content with upstream branch content
+    # for any dependency that has already completed — so downstream agents see the
+    # actual work produced by their upstream, not the stale main-branch version.
+    task_orm_for_deps = session.get(Task, task_id)
+    if task_orm_for_deps and task_orm_for_deps.depends_on:
+        for dep_task_id in task_orm_for_deps.depends_on:
+            dep_task = session.get(Task, dep_task_id)
+            if dep_task is None or dep_task.status not in (
+                "completed",
+                "validated",
+                "merged",
+                "closed",
+            ):
+                continue
+            dep_run = session.execute(
+                select(Run)
+                .where(Run.task_id == dep_task_id, Run.finished_at.isnot(None))
+                .order_by(Run.finished_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            if dep_run is None:
+                continue
+            dep_branch = dep_run.branch
+            for art in package.get("input_artifacts", []):
+                file_path = art["path"]
+                result = subprocess.run(
+                    ["git", "show", f"{dep_branch}:{file_path}"],
+                    cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    art["content"] = result.stdout
+                    art["provenance"] = "agent"
+                    art["source_branch"] = dep_branch
+                    art["found"] = True
 
     # Derive branch from agent type.
     # Resumed tasks get a -resume-N suffix so each resumption lands on a fresh branch;

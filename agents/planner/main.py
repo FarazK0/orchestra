@@ -19,14 +19,19 @@ import httpx
 import typer
 from dotenv import load_dotenv
 
-from agents.planner.plan_utils import PLANNER_SYSTEM_PROMPT, parse_task_plan, topo_sort
+from agents.planner.plan_utils import (
+    CHANGE_REQUEST_SYSTEM_PROMPT,
+    build_snapshot,
+    parse_task_plan,
+    topo_sort,
+)
 from agents.shared.llm import LLMClient
 
 load_dotenv()
 
 app = typer.Typer(name="planner", no_args_is_help=True)
 
-_SYSTEM_PROMPT = PLANNER_SYSTEM_PROMPT
+_SYSTEM_PROMPT = CHANGE_REQUEST_SYSTEM_PROMPT
 
 # Aliases so existing internal call-sites below continue to work.
 _topo_sort = topo_sort
@@ -151,9 +156,11 @@ def main(
         spec_text = spec_file.read_text()
         typer.echo(f"Spec: {spec_file} ({len(spec_text)} chars)")
         typer.echo("Calling LLM to decompose spec into tasks...")
+        snapshot = build_snapshot(repo_path)
+        user_content = f"## Project state\n\n{snapshot}\n\n## Change request\n\n{spec_text}"
         llm = LLMClient()
         response = llm.call(
-            messages=[{"role": "user", "content": spec_text}],
+            messages=[{"role": "user", "content": user_content}],
             system=_SYSTEM_PROMPT,
             run_id=None,
             session=None,

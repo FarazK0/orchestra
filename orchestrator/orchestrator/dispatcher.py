@@ -26,6 +26,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -131,6 +132,8 @@ class Dispatcher:
         session.commit()
         self._launch_agent(run)
 
+    _FAST_FAIL_THRESHOLD = 30  # seconds; below this indicates provider-side failure
+
     def _on_task_failed(self, task_id: str, session: Session) -> None:
         """Retry the task or escalate it when the retry budget is exhausted."""
         task = session.get(Task, task_id)
@@ -138,6 +141,16 @@ class Dispatcher:
             return  # stale event
         budget_retries: int = task.budget.get("retries", 0)
         if task.retry_count < budget_retries:
+            # Determine how long the last run took.
+            last_run = session.execute(
+                select(Run).where(Run.task_id == task_id).order_by(Run.started_at.desc()).limit(1)
+            ).scalar_one_or_none()
+            run_duration = (
+                (datetime.now(timezone.utc) - last_run.started_at).total_seconds()
+                if last_run and last_run.started_at
+                else 9999
+            )
+
             task.retry_count += 1
             run = create_run(
                 session,
@@ -155,7 +168,20 @@ class Dispatcher:
             self._publisher.publish(
                 str(event.event_id), "TASK_RETRIED", task_id, {"attempt": task.retry_count}
             )
-            self._launch_agent(run)
+
+            if run_duration < self._FAST_FAIL_THRESHOLD:
+                delay = 30 * (2 ** (task.retry_count - 1))  # 30s, then 60s
+                log.warning(
+                    "TASK %s: fast-fail (%ds < %ds threshold) — delaying retry by %ds",
+                    task_id,
+                    int(run_duration),
+                    self._FAST_FAIL_THRESHOLD,
+                    delay,
+                )
+                threading.Timer(delay, self._deferred_launch, args=(str(run.run_id),)).start()
+            else:
+                self._deferred_launch(str(run.run_id))
+
             log.info("Retrying task %s (attempt %d/%d)", task_id, task.retry_count, budget_retries)
         else:
             last_failed_ev = session.execute(
@@ -419,6 +445,23 @@ class Dispatcher:
     # ------------------------------------------------------------------
     # Agent launch
     # ------------------------------------------------------------------
+
+    def _deferred_launch(self, run_id: str) -> None:
+        """Open a fresh session, reload the run row, and launch the agent subprocess.
+
+        Called either directly (immediate retry) or from a threading.Timer callback
+        (fast-fail delayed retry). Using a fresh session avoids holding the handler's
+        session open across the delay.
+        """
+        try:
+            with self._session_factory() as session:
+                run = session.get(Run, run_id)
+                if run is None:
+                    log.warning("_deferred_launch: run %s not found", run_id)
+                    return
+                self._launch_agent(run)
+        except Exception:
+            log.exception("_deferred_launch failed for run %s", run_id)
 
     def _launch_agent(self, run: Run) -> None:
         agent_type = os.getenv("AGENT_TYPE", "claude-code")

@@ -43,6 +43,14 @@ def _build_instruction(pkg: dict, repo_path: str) -> str:
     acceptance_list = (
         "\n".join(f"- {c}" for c in task["acceptance"]) if task["acceptance"] else "(none)"
     )
+    write_scope: list[str] = pkg.get("agent_instructions", {}).get("write_scope", [])
+    scope_str = ", ".join(f"`{s}`" for s in write_scope) if write_scope else "(unrestricted)"
+    out_of_scope_note = (
+        f"\n**Scope: {scope_str} only. Do NOT write to any other path — "
+        "if you need to, use TASK_DISCOVERED (Step 1 in the Scope rule below).**"
+        if write_scope
+        else ""
+    )
 
     # Inline the pre-loaded input artifact content so Claude doesn't need extra reads.
     artifact_section = ""
@@ -93,12 +101,42 @@ def _build_instruction(pkg: dict, repo_path: str) -> str:
         )
         memory_section = "\n".join(parts)
 
+    # DAG section: show non-terminal tasks so the agent can decide before emitting
+    # TASK_DISCOVERED whether the work is already planned.
+    dag_section = ""
+    current_dag = pkg.get("current_dag", [])
+    active_dag = [t for t in current_dag if t.get("id") != task["id"]]
+    if active_dag:
+        rows = []
+        for dt in active_dag:
+            outs = ", ".join(dt.get("outputs", [])[:3]) or "(none)"
+            rows.append(f"| {dt['id']} | {dt['status']} | {dt['owner']} | {outs} |")
+        dag_section = (
+            "\n## Current task plan (check before emitting TASK_DISCOVERED)\n\n"
+            "Before emitting TASK_DISCOVERED, check this table. If the work you need is already\n"
+            "covered by a task's outputs below — even if that task has not run yet — do NOT emit\n"
+            "TASK_DISCOVERED. Complete your in-scope work and exit; Orchestra will run that task\n"
+            "when its dependencies are satisfied.\n\n"
+            "| ID | Status | Owner | Outputs |\n"
+            "|----|--------|-------|---------||\n" + "\n".join(rows) + "\n"
+        )
+
     task_id_val = task["id"]
     discovery_section = f"""
-## When you need work outside your output scope
+## Scope rule (read before touching any file)
 
-If you need to write files NOT in the "Output files" list above, do NOT attempt it yourself.
-Instead run the following command, then STOP immediately and exit:
+**Step 1 — Before writing any file:** scan everything this task requires and check two things:
+1. Are any needed files outside your scope ({scope_str})? If so, emit TASK_DISCOVERED for
+   each out-of-scope group (see command below), then continue with your in-scope work only.
+2. Does the task have more than 5 distinct acceptance criteria covering different subsystems?
+   If so, split: emit TASK_DISCOVERED for the larger subsystem, complete the smaller one
+   yourself, and resume after the child task finishes.
+Do this at the very start — before writing a single line of code or calling any tool.
+
+**Step 2 — If an out-of-scope need arises mid-work:** emit TASK_DISCOVERED, then exit.
+Orchestra will run the child task and restart you with the results.
+
+Command to emit TASK_DISCOVERED (fill in the placeholders):
 
   curl -s -X POST http://localhost:8081/emit_event \\
       -H 'Content-Type: application/json' \\
@@ -120,8 +158,7 @@ Instead run the following command, then STOP immediately and exit:
           }}
         }}}}'
 
-After running this command: stop all work, do not write more files, do not call task_complete,
-and exit. Orchestra will run the new task and restart you with the results.
+After emitting: do NOT write the out-of-scope files. Commit any in-scope work, then exit.
 """
 
     # Resumption context — prepended when this is a re-run after child task completion.
@@ -160,12 +197,12 @@ Your work will be committed to branch `{branch}` (already checked out for you).
 
 ## Output files (create or modify these)
 
-{outputs_list}
+{outputs_list}{out_of_scope_note}
 
 ## Input files
 
 {inputs_list}
-{artifact_section}{memory_section}{discovery_section}
+{artifact_section}{memory_section}{dag_section}{discovery_section}
 ## Rules
 
 - Work only within {repo_path}. Do not create files outside it.
@@ -274,12 +311,20 @@ def main(
             raise typer.Exit(1)
 
         if result.returncode != 0:
-            log.error("claude CLI exited %d:\n%s", result.returncode, result.stderr[:2000])
+            _stderr = (result.stderr or "").strip()
+            _stdout = (result.stdout or "").strip()
+            _hint = (_stderr or _stdout)[:300]
+            log.error(
+                "claude CLI exited %d:\nstderr: %s\nstdout: %s",
+                result.returncode,
+                result.stderr[:2000],
+                result.stdout[:500],
+            )
             _mark_failed(
                 http,
                 orch_url,
                 task_id,
-                f"claude_cli:exit_{result.returncode}:{result.stderr[:300]}",
+                f"claude_cli:exit_{result.returncode}:{_hint}",
             )
             raise typer.Exit(1)
 
@@ -307,6 +352,7 @@ def main(
             partial_untracked = subprocess.check_output(
                 ["git", "ls-files", "--others", "--exclude-standard"], cwd=repo_path, text=True
             )
+            _partial_scope: list[str] = pkg.get("agent_instructions", {}).get("write_scope", [])
             partial = [
                 p.strip()
                 for p in partial_tracked.splitlines() + partial_untracked.splitlines()
@@ -314,6 +360,7 @@ def main(
                 and "__pycache__" not in p
                 and not p.strip().endswith(".pyc")
                 and not p.strip().startswith(".orchestra/")
+                and (not _partial_scope or any(p.strip().startswith(s) for s in _partial_scope))
             ]
             if partial:
                 try:
@@ -350,6 +397,7 @@ def main(
             text=True,
         )
         all_raw = tracked_out.splitlines() + untracked_out.splitlines()
+        write_scope: list[str] = pkg.get("agent_instructions", {}).get("write_scope", [])
         changed_paths = [
             p.strip()
             for p in all_raw
@@ -357,7 +405,25 @@ def main(
             and "__pycache__" not in p
             and not p.strip().endswith(".pyc")
             and not p.strip().startswith(".orchestra/")
+            and (not write_scope or any(p.strip().startswith(s) for s in write_scope))
         ]
+        out_of_scope = [
+            p.strip()
+            for p in all_raw
+            if p.strip()
+            and "__pycache__" not in p
+            and not p.strip().endswith(".pyc")
+            and not p.strip().startswith(".orchestra/")
+            and write_scope
+            and not any(p.strip().startswith(s) for s in write_scope)
+        ]
+        if out_of_scope:
+            log.warning(
+                "Filtered %d out-of-scope file(s) (scope=%s): %s",
+                len(out_of_scope),
+                write_scope,
+                out_of_scope[:10],
+            )
 
         if not changed_paths:
             log.warning("claude exited 0 but no files changed; marking task failed")

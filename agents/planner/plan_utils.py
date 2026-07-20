@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+from pathlib import Path
 
 
 _TASK_JSON_SCHEMA = """\
@@ -17,34 +19,10 @@ Return ONLY a JSON array -- no explanation, no markdown code fences. Each elemen
   "owner":      "<agent-id>",
   "depends_on": ["<exact title of another task in this list>"],
   "inputs":     ["<repo-relative file path this task reads>"],
-  "outputs":    ["<repo-relative directory/ or file path this task writes — prefer a top-level directory like 'backend/' over listing individual files>"],
+  "outputs":    ["<repo-relative directory/ or file path this task exclusively owns — include root-level config files explicitly if no other task covers them (e.g. docker-compose.yml, .env.example, Makefile, next.config.ts, tailwind.config.ts, postcss.config.mjs, tsconfig.json)>"],
   "acceptance": ["<one acceptance criterion per string>"]
 }
 """
-
-PLANNER_SYSTEM_PROMPT = (
-    """\
-You are a project planner for the Orchestra multi-agent orchestration platform.
-Read the specification below and decompose the work into tasks for these agents:
-
-  backend-agent      -- server-side: APIs, data models, business logic, tests
-  frontend-agent     -- client-side: HTML, CSS, JavaScript, single-page UI
-  qa-agent           -- quality: test plans, QA reports, risk assessment
-  claude-code-agent  -- general purpose: Claude Code CLI worker; handles backend,
-                       frontend, or QA work; preferred when a single capable agent
-                       can own the full implementation
-
-"""
-    + _TASK_JSON_SCHEMA
-    + """
-Rules:
-- backend-agent tasks have no depends_on (they are always roots).
-- frontend-agent and qa-agent tasks depend on the backend-agent task whose outputs
-  they consume -- list those backend task titles in their depends_on.
-- Keep the plan to 3-5 tasks total; do not split work an agent can handle internally.
-- Do not include risk_tier; the planner will set it to 1 for all tasks.
-"""
-)
 
 CHANGE_REQUEST_SYSTEM_PROMPT = (
     """\
@@ -76,8 +54,87 @@ Rules:
 - Keep the plan to 1-5 tasks; do not over-split a change an agent can handle in one go.
 - Do not re-create tasks for work already done per the existing tasks list.
 - Do not include risk_tier; the planner sets it to 1 for all tasks.
+- Do not assign to any new task's outputs a path that appears after "->" in the
+  "In-flight tasks" section; those paths are owned by tasks currently in progress.
+  Paths in the "Completed/landed tasks" section are available for new work.
+- In outputs, prefer specific file paths over bare directories when working in an
+  existing codebase (e.g. "backend/app/routers/listings.py" not "backend/"). Use a
+  bare directory only when the task creates an entire new subsystem from scratch with
+  no pre-existing files under it.
+
+Coverage check (run before returning the plan):
+1. List every top-level directory and cross-cutting file the change requires.
+2. For each item, verify it is covered by at least one task's outputs list.
+3. If any item is uncovered, assign it to the most relevant existing task's outputs
+   or add a new task (owner: claude-code-agent) to cover it.
+Never return a plan where a file the change explicitly requires has no owning task.
+
+Task size limit:
+- No single task may have more than 5 acceptance criteria.
+- No single task may cover more than one major subsystem.
+- If a natural task would exceed these limits, split it with a depends_on relationship.
 """
 )
+
+
+def build_snapshot(repo_path: Path) -> str:
+    """Build a compact project snapshot from git log + file tree (no LLM, no cap).
+
+    Used by the one-shot planner (planner/main.py --spec mode) and as the fallback
+    for _discover_context() when the repo is empty or the LLM is unavailable.
+    """
+    lines: list[str] = []
+
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-20"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            lines.append("## Recent git history")
+            lines.append(result.stdout.strip())
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            [
+                "find",
+                ".",
+                "-not",
+                "-path",
+                "./.git*",
+                "-not",
+                "-path",
+                "./__pycache__*",
+                "-not",
+                "-name",
+                "*.pyc",
+                "-not",
+                "-path",
+                "./.pytest_cache*",
+                "-not",
+                "-path",
+                "./.ruff_cache*",
+                "-type",
+                "f",
+            ],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            files = sorted(result.stdout.splitlines())[:100]
+            lines.append("\n## Current file tree")
+            lines.append("\n".join(files))
+    except Exception:
+        pass
+
+    return "\n".join(lines) if lines else "(project state unavailable)"
 
 
 def topo_sort(tasks: list[dict]) -> list[dict]:

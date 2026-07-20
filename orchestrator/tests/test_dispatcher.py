@@ -421,6 +421,105 @@ def test_on_task_failed_skips_non_failed_task(clean_db, redis_client, session_fa
         assert task.status == "running"
 
 
+def test_fast_fail_delays_retry(clean_db, redis_client, session_factory, dispatcher):
+    """A run that finished in <30s triggers threading.Timer (delayed retry), not immediate launch."""
+    import sqlalchemy
+    from unittest.mock import MagicMock
+
+    task_id = _make_task(session_factory, "TASK-FF01", "failed", budget_retries=2, retry_count=0)
+
+    # Inject a prior run that started only 5 seconds ago (fast-fail scenario).
+    from datetime import timedelta
+
+    fast_start = datetime.now(timezone.utc) - timedelta(seconds=5)
+    with session_factory() as s:
+        s.add(
+            Run(
+                run_id=uuid.uuid4(),
+                schema_version=1,
+                task_id=task_id,
+                agent_id="backend-agent",
+                branch=f"agent/backend/{task_id}",
+                context_package_ref="/tmp/fake.json",
+                started_at=fast_start,
+                finished_at=datetime.now(timezone.utc),
+            )
+        )
+        s.commit()
+
+    timer_calls: list = []
+
+    def _fake_timer(delay, fn, args=()):
+        timer_calls.append((delay, fn, args))
+        mock_t = MagicMock()
+        mock_t.start.return_value = None
+        return mock_t
+
+    with (
+        patch("orchestrator.orchestrator.dispatcher.subprocess.Popen"),
+        patch("orchestrator.orchestrator.dispatcher.threading.Timer", side_effect=_fake_timer),
+    ):
+        with session_factory() as session:
+            dispatcher._on_task_failed(task_id, session)
+
+    # Fast-fail: a Timer should have been created, not immediate Popen.
+    assert len(timer_calls) >= 1, "Expected threading.Timer to be called for fast-fail retry"
+    delay, _, _ = timer_calls[0]
+    assert delay >= 30, f"Delay should be >=30s; got {delay}"
+
+    # Status should be 'running' (set before the timer fires)
+    with session_factory() as s:
+        task = s.get(Task, task_id)
+        assert task.retry_count == 1
+        run = (
+            s.execute(
+                sqlalchemy.select(Run).where(Run.task_id == task_id, Run.branch.contains("retry"))
+            )
+            .scalars()
+            .first()
+        )
+        assert run is not None
+
+
+def test_normal_fail_retries_immediately(clean_db, redis_client, session_factory, dispatcher):
+    """A run that took >30s triggers immediate retry (no threading.Timer)."""
+    task_id = _make_task(session_factory, "TASK-FF02", "failed", budget_retries=2, retry_count=0)
+
+    from datetime import timedelta
+
+    slow_start = datetime.now(timezone.utc) - timedelta(seconds=120)
+    with session_factory() as s:
+        s.add(
+            Run(
+                run_id=uuid.uuid4(),
+                schema_version=1,
+                task_id=task_id,
+                agent_id="backend-agent",
+                branch=f"agent/backend/{task_id}",
+                context_package_ref="/tmp/fake.json",
+                started_at=slow_start,
+                finished_at=datetime.now(timezone.utc),
+            )
+        )
+        s.commit()
+
+    timer_calls: list = []
+
+    with (
+        patch("orchestrator.orchestrator.dispatcher.subprocess.Popen") as mock_popen,
+        patch(
+            "orchestrator.orchestrator.dispatcher.threading.Timer",
+            side_effect=lambda *a, **kw: timer_calls.append(a),
+        ),
+    ):
+        with session_factory() as session:
+            dispatcher._on_task_failed(task_id, session)
+
+    # Normal-fail: Popen called immediately, no timer.
+    mock_popen.assert_called_once()
+    assert len(timer_calls) == 0, f"Expected no Timer for slow failure; got {timer_calls}"
+
+
 # ---------------------------------------------------------------------------
 # _on_task_discovered — replan triggering
 # ---------------------------------------------------------------------------

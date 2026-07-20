@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -115,7 +116,24 @@ def validate_task(
     results["ruff"] = _run_check(repo, [sys.executable, "-m", "ruff", "check", "."])
 
     # 3. Pytest.
-    results["pytest"] = _run_check(repo, [sys.executable, "-m", "pytest", "--tb=short", "-q"])
+    # If the repo has subdirectories with their own pyproject.toml (e.g. backend/),
+    # run each with `uv run --extra test pytest` so that project-specific deps are
+    # installed. Otherwise fall back to the orchestrator's own Python.
+    subdirs_with_pyproject = [
+        d for d in sorted(repo.iterdir()) if d.is_dir() and (d / "pyproject.toml").exists()
+    ]
+    if subdirs_with_pyproject:
+        uv = shutil.which("uv") or "uv"
+        combined: dict = {"returncode": 0, "stdout": "", "stderr": ""}
+        for subdir in subdirs_with_pyproject:
+            r = _run_check(subdir, [uv, "run", "--extra", "test", "pytest", "--tb=short", "-q"])
+            combined["stdout"] += f"\n--- {subdir.name} ---\n{r['stdout']}"
+            combined["stderr"] += r["stderr"]
+            if r["returncode"] not in (0, 5):
+                combined["returncode"] = r["returncode"]
+        results["pytest"] = combined
+    else:
+        results["pytest"] = _run_check(repo, [sys.executable, "-m", "pytest", "--tb=short", "-q"])
 
     pytest_rc = results["pytest"]["returncode"]
     passed = results["ruff"]["returncode"] == 0 and pytest_rc in (0, 5)
