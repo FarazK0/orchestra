@@ -847,10 +847,95 @@ def audit(
     for row in rows:
         ts = row["timestamp"][:19].replace("T", " ")
         action = row["action"][:30]
-        details_str = str(row.get("details", {}))
-        if len(details_str) > 80:
-            details_str = details_str[:77] + "..."
+        details = row.get("details") or {}
+        failure_reason = details.get("failure_reason", "")
+        details_str = str(details)
+        if len(details_str) > 400:
+            details_str = details_str[:397] + "..."
         typer.echo(f"  {ts:<26} {action:<30} {_d(details_str)}")
+        if failure_reason and "failed" in action or "escalated" in action:
+            typer.echo(f"  {'':26}   {_r('failure_reason:')} {failure_reason}")
+
+
+# ---------------------------------------------------------------------------
+# why — quick diagnostic panel for failed/escalated tasks
+# ---------------------------------------------------------------------------
+
+
+@app.command("why")
+def why(
+    task_id: str = typer.Argument(..., help="Task ID, e.g. TASK-001."),
+    repo: str = typer.Option(
+        None, "--repo", "-r", envvar="SANDBOX_REPO_PATH", help="Managed repo path."
+    ),
+    lines: int = typer.Option(25, "--lines", "-n", help="Run log lines to show."),
+) -> None:
+    """Show a diagnostic panel explaining why a task failed or escalated."""
+    import subprocess as _sp
+
+    with _client() as c:
+        task_resp = c.get(f"/tasks/{task_id}")
+        _handle_error(task_resp)
+        task = task_resp.json()
+
+        events_resp = c.get(f"/tasks/{task_id}/events")
+        _handle_error(events_resp)
+        events = events_resp.json()
+
+        runs_resp = c.get(f"/tasks/{task_id}/runs")
+        log_path: str | None = None
+        if runs_resp.status_code == 200:
+            runs = runs_resp.json()
+            if runs:
+                log_path = runs[0].get("log_path")
+
+    status = task.get("status", "?")
+    budget = task.get("budget") or {}
+    retry_count = task.get("retry_count", 0)
+    max_retries = budget.get("retries", 2)
+
+    # Extract failure reason from last TASK_FAILED or TASK_ESCALATED event
+    failure_reason = "unknown"
+    for ev in events:
+        etype = ev.get("event_type", "")
+        if etype in ("TASK_FAILED", "TASK_ESCALATED"):
+            payload = ev.get("payload") or {}
+            fr = payload.get("failure_reason") or payload.get("last_failure_reason")
+            if fr:
+                failure_reason = fr
+                break
+
+    sep = "─" * 64
+    typer.echo(
+        f"\n{_b(f'── {task_id} ({status})')} {sep[: max(0, 60 - len(task_id) - len(status))]}"
+    )
+    typer.echo(f"  {_b('Last failure :')} {failure_reason}")
+    typer.echo(f"  {_b('Retries used :')} {retry_count}/{max_retries}")
+
+    typer.echo(f"\n{_b('── Last run log')} (tail {lines}) {'─' * 44}")
+    if log_path and Path(log_path).exists():
+        content = Path(log_path).read_text(encoding="utf-8", errors="replace")
+        for line in content.splitlines()[-lines:]:
+            typer.echo(f"  {line}")
+    else:
+        typer.echo(f"  {_d('(no run log found)')}")
+
+    typer.echo(f"\n{_b('── Sandbox git status')} {'─' * 42}")
+    if repo:
+        try:
+            result = _sp.run(
+                ["git", "-C", repo, "status", "--short", "--branch"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            for line in (result.stdout or result.stderr or "(empty)").splitlines():
+                typer.echo(f"  {line}")
+        except Exception as exc:
+            typer.echo(f"  {_d(f'(git status failed: {exc})')}")
+    else:
+        typer.echo(f"  {_d('(pass --repo or set SANDBOX_REPO_PATH to see git state)')}")
+    typer.echo("")
 
 
 # ---------------------------------------------------------------------------

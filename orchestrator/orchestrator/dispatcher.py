@@ -21,11 +21,13 @@ Optional env vars (defaults shown):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import subprocess
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -123,6 +125,8 @@ class Dispatcher:
             return  # _recover_stale will retry once conflicts clear
         run = create_run(session, task_id, task.owner, self._repo_path, self._store_dir)
         run.log_path = str(self._store_dir / "logs" / f"{run.run_id}.log")
+        if not self._preflight_check(run, session, task_id):
+            return
         transition(session, task_id, "running", actor="dispatcher")
         session.commit()
         self._launch_agent(run)
@@ -144,6 +148,8 @@ class Dispatcher:
                 retry_count=task.retry_count,
             )
             run.log_path = str(self._store_dir / "logs" / f"{run.run_id}.log")
+            if not self._preflight_check(run, session, task_id):
+                return
             event = transition(session, task_id, "running", actor="dispatcher")
             session.commit()
             self._publisher.publish(
@@ -152,15 +158,74 @@ class Dispatcher:
             self._launch_agent(run)
             log.info("Retrying task %s (attempt %d/%d)", task_id, task.retry_count, budget_retries)
         else:
-            event = transition(session, task_id, "escalated", actor="dispatcher")
+            last_failed_ev = session.execute(
+                select(Event)
+                .where(Event.task_id == task_id, Event.event_type == "TASK_FAILED")
+                .order_by(Event.emitted_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            last_reason = (
+                (last_failed_ev.payload or {}).get("failure_reason", "unknown")
+                if last_failed_ev
+                else "unknown"
+            )
+            event = transition(
+                session,
+                task_id,
+                "escalated",
+                actor="dispatcher",
+                details={"failure_reason": last_reason, "retry_count": task.retry_count},
+            )
             session.commit()
             self._publisher.publish(
                 str(event.event_id),
                 "TASK_ESCALATED",
                 task_id,
-                {"reason": "retries_exhausted", "retry_count": task.retry_count},
+                {
+                    "reason": "retries_exhausted",
+                    "retry_count": task.retry_count,
+                    "last_failure_reason": last_reason,
+                },
             )
-            log.warning("Task %s escalated after %d failed attempts", task_id, task.retry_count)
+            log.warning(
+                "Task %s escalated after %d failed attempts; last reason: %s",
+                task_id,
+                task.retry_count,
+                last_reason,
+            )
+
+    def _preflight_check(self, run: Run, session: Session, task_id: str) -> bool:
+        """Validate the context package before launching the agent.
+
+        Returns True if the agent should proceed, False if the task has been
+        failed and the caller should return without launching a subprocess.
+        """
+        pkg_path = Path(run.context_package_ref)
+        if not pkg_path.exists():
+            return True  # non-local ref (e.g. S3) — skip check
+        try:
+            pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+        except Exception:
+            return True  # can't read package — let agent fail naturally
+
+        if not pkg.get("capability_token"):
+            reason = "preflight:capability_token_empty — is CAPABILITY_SECRET set in .env?"
+            log.error("TASK %s: %s", task_id, reason)
+            run.finished_at = datetime.now(timezone.utc)
+            run.result = "preflight_failure"
+            transition(
+                session, task_id, "failed", actor="dispatcher", details={"failure_reason": reason}
+            )
+            session.commit()
+            return False
+
+        write_scope = pkg.get("agent_instructions", {}).get("write_scope", [])
+        if not write_scope:
+            log.warning(
+                "TASK %s: write_scope is empty — all gateway writes will be rejected", task_id
+            )
+
+        return True
 
     def _on_task_validated(self, task_id: str, session: Session) -> None:
         """Auto-merge Tier 0 tasks; always advance DAG successors."""

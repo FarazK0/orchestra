@@ -184,13 +184,18 @@ def _call(client: httpx.Client, method: str, url: str, **kwargs) -> dict:
     return resp.json()
 
 
-def _mark_failed(http: httpx.Client, orch_url: str, task_id: str) -> None:
+def _mark_failed(http: httpx.Client, orch_url: str, task_id: str, reason: str = "unknown") -> None:
     try:
         http.post(
             f"{orch_url}/tasks/{task_id}/transition",
-            json={"new_status": "failed", "actor": "claude-code-agent"},
+            json={
+                "new_status": "failed",
+                "actor": "claude-code-agent",
+                "payload": {"failure_reason": reason},
+                "details": {"failure_reason": reason},
+            },
         )
-        log.info("Task %s marked failed", task_id)
+        log.info("Task %s marked failed: %s", task_id, reason)
     except Exception as exc:
         log.warning("Could not mark task %s as failed: %s", task_id, exc)
 
@@ -236,7 +241,12 @@ def main(
             log.info("Branch created: %s", branch)
         except httpx.HTTPStatusError as exc:
             log.error("Failed to create branch: %s", exc.response.text)
-            _mark_failed(http, orch_url, task_id)
+            _mark_failed(
+                http,
+                orch_url,
+                task_id,
+                f"gateway:git_branch:{exc.response.status_code}:{exc.response.text[:300]}",
+            )
             raise typer.Exit(1)
 
         # ── 2. Run Claude Code ─────────────────────────────────────────────
@@ -256,16 +266,21 @@ def main(
             )
         except FileNotFoundError:
             log.error("'claude' CLI not found. Install Claude Code and run `claude login`.")
-            _mark_failed(http, orch_url, task_id)
+            _mark_failed(http, orch_url, task_id, "claude_cli:not_found")
             raise typer.Exit(1)
         except subprocess.TimeoutExpired:
             log.error("claude CLI timed out after 1800s")
-            _mark_failed(http, orch_url, task_id)
+            _mark_failed(http, orch_url, task_id, "claude_cli:timeout:1800s")
             raise typer.Exit(1)
 
         if result.returncode != 0:
             log.error("claude CLI exited %d:\n%s", result.returncode, result.stderr[:2000])
-            _mark_failed(http, orch_url, task_id)
+            _mark_failed(
+                http,
+                orch_url,
+                task_id,
+                f"claude_cli:exit_{result.returncode}:{result.stderr[:300]}",
+            )
             raise typer.Exit(1)
 
         log.info("claude CLI finished successfully")
@@ -295,7 +310,10 @@ def main(
             partial = [
                 p.strip()
                 for p in partial_tracked.splitlines() + partial_untracked.splitlines()
-                if p.strip() and "__pycache__" not in p and not p.strip().endswith(".pyc")
+                if p.strip()
+                and "__pycache__" not in p
+                and not p.strip().endswith(".pyc")
+                and not p.strip().startswith(".orchestra/")
             ]
             if partial:
                 try:
@@ -335,12 +353,15 @@ def main(
         changed_paths = [
             p.strip()
             for p in all_raw
-            if p.strip() and "__pycache__" not in p and not p.strip().endswith(".pyc")
+            if p.strip()
+            and "__pycache__" not in p
+            and not p.strip().endswith(".pyc")
+            and not p.strip().startswith(".orchestra/")
         ]
 
         if not changed_paths:
             log.warning("claude exited 0 but no files changed; marking task failed")
-            _mark_failed(http, orch_url, task_id)
+            _mark_failed(http, orch_url, task_id, "no_files_changed")
             raise typer.Exit(1)
 
         log.info("Changed files: %s", changed_paths)
@@ -364,7 +385,12 @@ def main(
             log.info("Committed: sha=%s", sha)
         except httpx.HTTPStatusError as exc:
             log.error("Commit failed: %s", exc.response.text)
-            _mark_failed(http, orch_url, task_id)
+            _mark_failed(
+                http,
+                orch_url,
+                task_id,
+                f"gateway:git_commit:{exc.response.status_code}:{exc.response.text[:300]}",
+            )
             raise typer.Exit(1)
 
         # ── 4.5. Audit per-file writes (non-fatal) ────────────────────────
