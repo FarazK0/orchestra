@@ -422,6 +422,9 @@ class Dispatcher:
 
 
 def main() -> None:
+    from dotenv import load_dotenv
+
+    load_dotenv()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6380")
     db_url = os.getenv(
