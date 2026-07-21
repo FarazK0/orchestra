@@ -166,6 +166,7 @@ class GitBranch(BaseModel):
 class GitBranchResponse(BaseModel):
     branch: str
     created: bool
+    worktree_path: str | None = None
 
 
 class GitCommit(BaseModel):
@@ -510,26 +511,60 @@ def git_branch(
 
     repo = Path(body.repo_path)
 
-    # Try to create; fall back to checkout if it already exists.
-    result = _git(["checkout", "-b", body.branch], cwd=repo)
-    created = result.returncode == 0
-    if not created:
-        result = _git(["checkout", body.branch], cwd=repo)
+    # Create an isolated worktree per branch so concurrent agents don't share
+    # the same working directory and collide on git checkout.
+    worktrees_base = Path("/tmp/orchestra/worktrees")
+    worktrees_base.mkdir(parents=True, exist_ok=True)
+    branch_slug = body.branch.replace("/", "_")
+    worktree_path = worktrees_base / branch_slug
+
+    import shutil
+
+    created = False
+
+    # Check if the worktree is already registered in *this* repo (not a stale
+    # leftover from a previous test or process that used a different git repo).
+    wt_list = _git(["worktree", "list", "--porcelain"], cwd=repo)
+    is_our_worktree = worktree_path.exists() and any(
+        line.strip() == f"worktree {worktree_path}"
+        for line in (wt_list.stdout.splitlines() if wt_list.returncode == 0 else [])
+    )
+
+    if is_our_worktree:
+        # Valid worktree already registered; ensure we're on the right branch.
+        result = _git(["checkout", body.branch], cwd=worktree_path)
         if result.returncode != 0:
             raise HTTPException(
                 status_code=500,
-                detail=f"git branch failed: {result.stderr.strip()}",
+                detail=f"git worktree checkout failed: {result.stderr.strip()}",
             )
+    else:
+        # No valid worktree at this path — clean up any stale directory first.
+        if worktree_path.exists():
+            _git(["worktree", "prune"], cwd=repo)
+            shutil.rmtree(worktree_path, ignore_errors=True)
+
+        # Create new worktree + new branch, or attach to an existing branch.
+        result = _git(["worktree", "add", str(worktree_path), "-b", body.branch], cwd=repo)
+        if result.returncode == 0:
+            created = True
+        else:
+            result = _git(["worktree", "add", str(worktree_path), body.branch], cwd=repo)
+            if result.returncode != 0:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"git worktree add failed: {result.stderr.strip()}",
+                )
 
     write_gateway_audit(
         session,
         actor=body.agent_id,
         operation="git_branch",
         task_id=body.task_id,
-        details={"branch": body.branch, "created": created},
+        details={"branch": body.branch, "created": created, "worktree_path": str(worktree_path)},
     )
 
-    return GitBranchResponse(branch=body.branch, created=created)
+    return GitBranchResponse(branch=body.branch, created=created, worktree_path=str(worktree_path))
 
 
 @app.post("/git/commit", response_model=GitCommitResponse)
@@ -627,6 +662,12 @@ def git_merge(body: GitMerge, session: SessionDep) -> GitMergeResponse:
         task_id=body.task_id,
         details={"branch": body.branch, "target_branch": body.target_branch, "sha": sha},
     )
+
+    # Remove the agent worktree now that the branch has been merged.
+    branch_slug = body.branch.replace("/", "_")
+    worktree_path = Path("/tmp/orchestra/worktrees") / branch_slug
+    if worktree_path.exists():
+        _git(["worktree", "remove", "--force", str(worktree_path)], cwd=repo)
 
     return GitMergeResponse(sha=sha, merged=True)
 

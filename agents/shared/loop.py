@@ -513,13 +513,16 @@ def run_agent_loop(
 
     with httpx.Client(timeout=60.0) as http:
         # Create/switch to the agent branch before the first LLM turn.
-        _call_gateway(
+        branch_resp = _call_gateway(
             http,
             gateway_url,
             "/git/branch",
             {"agent_id": agent_id, "task_id": task_id, "repo_path": repo_path, "branch": branch},
             headers=_auth_headers,
         )
+        # Use the worktree as the working directory so concurrent agents are isolated.
+        if branch_resp and branch_resp.get("worktree_path"):
+            repo_path = branch_resp["worktree_path"]
 
         for _iteration in range(max_iterations):
             response = llm.call(

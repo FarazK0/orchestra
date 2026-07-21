@@ -101,7 +101,13 @@ class StreamConsumer:
         Returns the number of entries reclaimed.
         """
         threshold = idle_ms if idle_ms is not None else self.RECLAIM_IDLE_MS
-        pending = self._r.xpending_range(self.stream_key, self.group, "-", "+", count=1000)
+        try:
+            pending = self._r.xpending_range(self.stream_key, self.group, "-", "+", count=1000)
+        except redis.exceptions.ResponseError as exc:
+            if "NOGROUP" not in str(exc):
+                raise
+            self.ensure_group()
+            return 0
         claimed = 0
         for entry in pending:
             if entry["time_since_delivered"] >= threshold:
@@ -125,13 +131,25 @@ class StreamConsumer:
         Returns True if at least one message was processed, False if the stream
         was empty for the full ``block_ms`` window.
         """
-        results = self._r.xreadgroup(
-            self.group,
-            self.name,
-            {self.stream_key: ">"},
-            count=10,
-            block=block_ms,
-        )
+        try:
+            results = self._r.xreadgroup(
+                self.group,
+                self.name,
+                {self.stream_key: ">"},
+                count=10,
+                block=block_ms,
+            )
+        except redis.exceptions.ResponseError as exc:
+            if "NOGROUP" not in str(exc):
+                raise
+            self.ensure_group()
+            results = self._r.xreadgroup(
+                self.group,
+                self.name,
+                {self.stream_key: ">"},
+                count=10,
+                block=block_ms,
+            )
         if not results:
             return False
         for _stream, messages in results:

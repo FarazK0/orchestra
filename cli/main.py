@@ -34,8 +34,8 @@ app = typer.Typer(
 _URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8080")
 
 
-def _client() -> httpx.Client:
-    return httpx.Client(base_url=_URL, timeout=10.0)
+def _client(timeout: float = 10.0) -> httpx.Client:
+    return httpx.Client(base_url=_URL, timeout=timeout)
 
 
 def _handle_error(resp: httpx.Response) -> None:
@@ -308,8 +308,18 @@ def merge(
         )
         raise typer.Exit(1)
 
-    agent_type = task["owner"].removesuffix("-agent")
-    branch = f"agent/{agent_type}/{task_id}"
+    # Derive branch from the most recent run (handles retries like -retry-2).
+    try:
+        with _client() as c:
+            runs_resp = c.get(f"/tasks/{task_id}/runs")
+        runs_resp.raise_for_status()
+        runs = runs_resp.json()
+        branch = runs[0]["branch"] if runs else None
+    except Exception:
+        branch = None
+    if not branch:
+        agent_type = task["owner"].removesuffix("-agent")
+        branch = f"agent/{agent_type}/{task_id}"
 
     # 2. Git merge via gateway.
     with httpx.Client(base_url=gw, timeout=30.0) as gw_client:
@@ -371,7 +381,7 @@ def validate(
     On pass:  task transitions to 'validated'.
     On fail:  task transitions to 'failed'.
     """
-    with _client() as c:
+    with _client(timeout=120.0) as c:
         resp = c.post(
             f"/tasks/{task_id}/validate",
             json={"repo_path": repo, "actor": actor},
@@ -682,6 +692,26 @@ def cancel(
         )
     _handle_error(resp)
     typer.echo(f"Cancelled {task_id}: {task['status']} → cancelled  ({task['title']!r})")
+
+
+@app.command("recover")
+def recover(
+    task_id: str = typer.Argument(..., help="Task ID to recover, e.g. TASK-007."),
+    note: str = typer.Option("", "--note", "-n", help="Reason for manual recovery."),
+) -> None:
+    """Mark an escalated task as completed so it can be validated and merged.
+
+    \b
+    Use when an agent's work is done but the task is stuck in 'escalated' after
+    repeated run failures. After recovery, run 'validate' then 'merge'.
+    """
+    with _client() as c:
+        resp = c.post(
+            f"/tasks/{task_id}/transition",
+            json={"new_status": "completed", "actor": "human", "details": {"recovery_note": note}},
+        )
+    _handle_error(resp)
+    typer.echo(f"{task_id}: escalated -> completed. Run 'validate' next.")
 
 
 @app.command("review")

@@ -76,6 +76,36 @@ def _list_repo_files(repo_path: Path) -> list[str]:
                 "-not",
                 "-path",
                 "./.ruff_cache*",
+                "-not",
+                "-path",
+                "./.venv*",
+                "-not",
+                "-path",
+                "*/node_modules*",
+                "-not",
+                "-path",
+                "./.next*",
+                "-not",
+                "-path",
+                "./.orchestra*",
+                "-not",
+                "-path",
+                "*/dist/*",
+                "-not",
+                "-path",
+                "*/build/*",
+                "-not",
+                "-path",
+                "*/*.egg-info*",
+                "-not",
+                "-path",
+                "*/.mypy_cache*",
+                "-not",
+                "-path",
+                "*/htmlcov*",
+                "-not",
+                "-path",
+                "*/target/*",
                 "-type",
                 "f",
             ],
@@ -147,12 +177,12 @@ def _discover_context(
             else:
                 claude_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
                 proc = subprocess.run(
-                    ["claude", "--dangerously-skip-permissions", "-p", prompt],
+                    ["claude", "--dangerously-skip-permissions", "-p", "-"],
+                    input=prompt,
                     env=claude_env,
                     capture_output=True,
                     text=True,
                     timeout=60,
-                    stdin=subprocess.DEVNULL,
                 )
                 if proc.returncode != 0:
                     log.warning(
@@ -306,12 +336,12 @@ def _decompose_with_claude(
 
     claude_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
     result = subprocess.run(
-        ["claude", "--dangerously-skip-permissions", "-p", prompt],
+        ["claude", "--dangerously-skip-permissions", "-p", "-"],
+        input=prompt,
         env=claude_env,
         capture_output=True,
         text=True,
         timeout=300,
-        stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
         raise RuntimeError(f"claude CLI exited {result.returncode}: {result.stderr[:500]}")

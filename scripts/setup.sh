@@ -253,14 +253,14 @@ _start_service() {
 }
 
 cd "$ROOT"
-_start_service orchestrator uv run uvicorn orchestrator.orchestrator.api:app --port 8080
-_start_service gateway      uv run uvicorn gateway.gateway.app:app --port 8081
+_start_service orchestrator env PYTHONPATH="$ROOT" "$ROOT/.venv/bin/python" -m uvicorn orchestrator.orchestrator.api:app --port 8080
+_start_service gateway      env PYTHONPATH="$ROOT" "$ROOT/.venv/bin/python" -m uvicorn gateway.gateway.app:app --port 8081
 _start_service dispatcher \
-  env SANDBOX_REPO_PATH="$REPO" RUN_STORE_DIR="$RUN_STORE_DIR" \
-  uv run python -m orchestrator.orchestrator.dispatcher
+  env PYTHONPATH="$ROOT" SANDBOX_REPO_PATH="$REPO" RUN_STORE_DIR="$RUN_STORE_DIR" \
+  "$ROOT/.venv/bin/python" -m orchestrator.orchestrator.dispatcher
 _start_service root-agent \
-  env SANDBOX_REPO_PATH="$REPO" AGENT_TYPE="${AGENT_TYPE:-claude-code}" \
-  uv run python -m agents.root.main
+  env PYTHONPATH="$ROOT" SANDBOX_REPO_PATH="$REPO" AGENT_TYPE="${AGENT_TYPE:-claude-code}" \
+  "$ROOT/.venv/bin/python" -m agents.root.main
 
 # ── 8. Health checks ──────────────────────────────────────────────────────────
 sep "Waiting for services"

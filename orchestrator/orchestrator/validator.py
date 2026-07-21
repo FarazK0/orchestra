@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -34,10 +35,23 @@ def _git(repo: Path, *args: str) -> tuple[int, str, str]:
     return r.returncode, r.stdout.strip(), r.stderr.strip()
 
 
+_SANDBOX_ENV_ISOLATE = ("DATABASE_URL", "REDIS_URL", "DATABASE_HOST")
+
+
+def _clean_env() -> dict:
+    """Return os.environ with sandbox-interfering vars stripped."""
+    env = os.environ.copy()
+    for key in _SANDBOX_ENV_ISOLATE:
+        env.pop(key, None)
+    return env
+
+
 def _run_check(repo: Path, cmd: list[str]) -> dict:
     """Run a command in *repo* and return a result dict."""
     try:
-        r = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=120)
+        r = subprocess.run(
+            cmd, cwd=repo, capture_output=True, text=True, timeout=120, env=_clean_env()
+        )
         return {"returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
     except subprocess.TimeoutExpired:
         return {"returncode": -1, "stdout": "", "stderr": "timed out after 120s"}
@@ -105,12 +119,19 @@ def validate_task(
         "checkout_error": None,
     }
 
-    # 1. Checkout the agent branch.
-    rc, _out, err = _git(repo, "checkout", branch)
-    if rc != 0:
-        results["checkout_error"] = err or f"git checkout {branch} failed (rc={rc})"
-        _finalize(session, task_id, passed=False, actor=actor, results=results)
-        return {**results, "passed": False}
+    # 1. Use the agent's worktree if it exists (avoids checkout pollution in the main repo).
+    branch_slug = branch.replace("/", "_")
+    worktree_path = Path("/tmp/orchestra/worktrees") / branch_slug
+    used_worktree = worktree_path.exists()
+
+    if used_worktree:
+        repo = worktree_path
+    else:
+        rc, _out, err = _git(repo, "checkout", branch)
+        if rc != 0:
+            results["checkout_error"] = err or f"git checkout {branch} failed (rc={rc})"
+            _finalize(session, task_id, passed=False, actor=actor, results=results)
+            return {**results, "passed": False}
 
     # 2. Ruff check.
     results["ruff"] = _run_check(repo, [sys.executable, "-m", "ruff", "check", "."])
@@ -148,6 +169,11 @@ def validate_task(
         pass
 
     _finalize(session, task_id, passed=passed, actor=actor, results=results)
+
+    # Restore the main repo to main if we checked out the agent branch in it (no worktree).
+    if not used_worktree:
+        _git(Path(repo_path).resolve(), "checkout", "main")
+
     return {**results, "passed": passed}
 
 

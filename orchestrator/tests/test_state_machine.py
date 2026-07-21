@@ -122,6 +122,7 @@ def test_transition_covers_all_defined_edges():
         ("failed", "escalated"),
         ("escalated", "cancelled"),
         ("escalated", "running"),
+        ("escalated", "completed"),
         ("created", "cancelled"),
         ("assigned", "cancelled"),
         ("running", "cancelled"),

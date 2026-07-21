@@ -263,7 +263,7 @@ def main(
     with httpx.Client(timeout=30.0) as http:
         # ── 1. Create branch via gateway ─────────────────────────────────────
         try:
-            _call(
+            branch_resp = _call(
                 http,
                 "POST",
                 f"{gw_url}/git/branch",
@@ -275,7 +275,10 @@ def main(
                 },
                 headers=_auth_hdrs,
             )
-            log.info("Branch created: %s", branch)
+            # Use the worktree as the working directory so concurrent agents are isolated.
+            if branch_resp and branch_resp.get("worktree_path"):
+                repo_path = branch_resp["worktree_path"]
+            log.info("Branch created: %s (repo_path=%s)", branch, repo_path)
         except httpx.HTTPStatusError as exc:
             log.error("Failed to create branch: %s", exc.response.text)
             _mark_failed(
