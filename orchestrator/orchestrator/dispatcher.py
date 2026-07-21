@@ -89,6 +89,7 @@ class Dispatcher:
             self._tick += 1
             if self._tick % _RECOVER_INTERVAL == 0:
                 self._recover_stale()
+                self._check_heartbeats()
 
     # ------------------------------------------------------------------
     # Stream handler
@@ -522,6 +523,68 @@ class Dispatcher:
                     if not conflicts:
                         self._publisher.publish(str(uuid.uuid4()), "TASK_ASSIGNED", task.id, {})
                         log.info("Recovered stale assigned task %s", task.id)
+
+    # Heartbeat TTL must match the value used in gateway/app.py POST /heartbeat.
+    _HEARTBEAT_TTL = 180       # seconds — key expires after 3× the 60 s ping interval
+    # Minimum run age before we declare it stale (avoids suspending agents that
+    # never managed to start their heartbeat thread before the watchdog checked).
+    _HEARTBEAT_GRACE = 360     # 6 min: 2× TTL plus buffer for slow agent startup
+
+    def _check_heartbeats(self) -> None:
+        """Suspend running tasks whose heartbeat key has expired in Redis.
+
+        Called every _RECOVER_INTERVAL ticks alongside _recover_stale. If the
+        heartbeat key is present the agent is alive. If absent AND the run is
+        older than _HEARTBEAT_GRACE seconds, we transition the task to
+        'suspended' so the human can resume it via `orchctl resume`.
+        """
+        try:
+            import redis as _redis
+            from .streams import get_redis_url
+            r = _redis.from_url(get_redis_url())
+        except Exception:
+            return  # Redis not available; skip watchdog this tick
+
+        now = datetime.now(timezone.utc)
+        with self._session_factory() as session:
+            running_tasks = session.execute(
+                select(Task).where(Task.status == "running")
+            ).scalars().all()
+
+            for task in running_tasks:
+                try:
+                    if r.exists(f"task:{task.id}:heartbeat"):
+                        continue  # alive
+
+                    run = session.execute(
+                        select(Run)
+                        .where(Run.task_id == task.id, Run.finished_at.is_(None))
+                        .order_by(Run.started_at.desc())
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    if run is None:
+                        continue
+
+                    started = run.started_at
+                    if started.tzinfo is None:
+                        started = started.replace(tzinfo=timezone.utc)
+                    age = (now - started).total_seconds()
+                    if age < self._HEARTBEAT_GRACE:
+                        continue  # too young; heartbeat may not have started yet
+
+                    transition(
+                        session,
+                        task.id,
+                        "suspended",
+                        actor="dispatcher-watchdog",
+                        payload={"reason": "no_heartbeat", "stale_seconds": int(age)},
+                    )
+                    session.commit()
+                    log.warning(
+                        "Suspended stale task %s (no heartbeat, age=%ds)", task.id, int(age)
+                    )
+                except Exception:
+                    log.exception("Error checking heartbeat for task %s", task.id)
 
 
 # ---------------------------------------------------------------------------

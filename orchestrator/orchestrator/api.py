@@ -313,8 +313,11 @@ def transition_task(
         raise HTTPException(status_code=404, detail=f"Task {task_id!r} not found")
     except InvalidTransitionError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
-    bg.add_task(_try_publish, str(event.event_id), event.event_type, task_id, event.payload)
+    # If the caller supplied a checkpoint (e.g. running → suspended), persist it.
     task = session.get(TaskORM, task_id)
+    if body.details.get("checkpoint") is not None:
+        task.checkpoint = body.details["checkpoint"]
+    bg.add_task(_try_publish, str(event.event_id), event.event_type, task_id, event.payload)
     tasks_total.labels(new_status=body.new_status, owner=task.owner).inc()
     if body.new_status == "merged":
         validated_event = session.execute(

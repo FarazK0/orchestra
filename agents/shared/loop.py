@@ -11,6 +11,8 @@ The caller owns the DB session transaction.
 
 from __future__ import annotations
 
+import subprocess
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -212,11 +214,132 @@ GATEWAY_TOOLS: list[dict[str, Any]] = [
 # ---------------------------------------------------------------------------
 
 
+def _run_heartbeat(
+    gw_url: str,
+    task_id: str,
+    agent_id: str,
+    auth_hdrs: dict,
+    stop: threading.Event,
+    interval: int = 60,
+) -> None:
+    while not stop.wait(interval):
+        try:
+            with httpx.Client(timeout=10.0) as c:
+                c.post(
+                    f"{gw_url}/heartbeat",
+                    json={"task_id": task_id, "agent_id": agent_id},
+                    headers=auth_hdrs,
+                )
+        except Exception:
+            pass  # best-effort
+
+
+def _start_heartbeat(
+    gw_url: str, task_id: str, agent_id: str, auth_hdrs: dict
+) -> threading.Event:
+    stop = threading.Event()
+    threading.Thread(
+        target=_run_heartbeat,
+        args=(gw_url, task_id, agent_id, auth_hdrs, stop),
+        daemon=True,
+    ).start()
+    return stop
+
+
+def _try_suspend_or_fail(
+    orchestrator_url: str,
+    task_id: str,
+    agent_id: str,
+    repo_path: str,
+    gateway_url: str,
+    http: httpx.Client,
+    auth_headers: dict,
+    reason: str,
+) -> None:
+    """Flush uncommitted work, then suspend (if commits exist) or fail the task."""
+    # Flush dirty files
+    try:
+        dirty = subprocess.check_output(
+            ["git", "diff", "--name-only", "HEAD"], cwd=repo_path, text=True
+        ).splitlines()
+        staged = subprocess.check_output(
+            ["git", "diff", "--cached", "--name-only"], cwd=repo_path, text=True
+        ).splitlines()
+        flush_paths = list({p.strip() for p in dirty + staged if p.strip()})
+        if flush_paths:
+            http.post(
+                f"{gateway_url}/git/commit",
+                json={
+                    "agent_id": agent_id,
+                    "task_id": task_id,
+                    "repo_path": repo_path,
+                    "message": f"[{task_id}] partial work before suspension",
+                    "paths": flush_paths,
+                },
+                headers=auth_headers,
+            )
+    except Exception:
+        pass
+
+    # Check commits
+    try:
+        log_out = subprocess.check_output(
+            ["git", "log", "main..HEAD", "--oneline"], cwd=repo_path, text=True
+        )
+        commits = [ln.strip() for ln in log_out.splitlines() if ln.strip()]
+    except Exception:
+        commits = []
+
+    if not commits:
+        http.post(
+            f"{orchestrator_url}/tasks/{task_id}/transition",
+            json={
+                "new_status": "failed",
+                "actor": agent_id,
+                "payload": {"failure_reason": reason},
+                "details": {"failure_reason": reason},
+            },
+        )
+        return
+
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_path, text=True
+        ).strip()
+    except Exception:
+        branch = ""
+
+    http.post(
+        f"{orchestrator_url}/tasks/{task_id}/transition",
+        json={
+            "new_status": "suspended",
+            "actor": agent_id,
+            "payload": {"suspension_reason": reason},
+            "details": {
+                "checkpoint": {
+                    "type": "suspension",
+                    "suspended_branch": branch,
+                    "partial_commits": commits,
+                    "reason": reason,
+                }
+            },
+        },
+    )
+
+
 def _format_resumption_section(pkg: dict) -> list[str]:
     """Return lines for the resumption preamble, or empty list for first-run tasks."""
     if not pkg.get("is_resumption"):
         return []
-    cp = pkg.get("checkpoint") or {}
+    checkpoint_data = pkg.get("checkpoint") or {}
+
+    # Suspension resume: agent was interrupted (API down, killed, no credits).
+    if checkpoint_data.get("type") == "suspension":
+        rc = pkg.get("resume_context") or {}
+        return ["## RESUMING INTERRUPTED TASK", "", rc.get("instruction", ""), ""]
+
+    # Blocked resume: parent task resumes after child task completed.
+    cp = checkpoint_data
     child_outputs: list[dict] = pkg.get("child_outputs") or []
 
     lines = ["## Resumption context", ""]
@@ -503,7 +626,11 @@ def run_agent_loop(
 
     messages: list[dict] = [{"role": "user", "content": format_context_package(context_package)}]
 
+    hb_stop_ref: list[threading.Event] = []  # populated after heartbeat is started
+
     def _finish(result: str) -> str:
+        if hb_stop_ref:
+            hb_stop_ref[0].set()
         run = session.get(Run, run_id)
         if run is not None:
             run.finished_at = datetime.now(timezone.utc)
@@ -524,14 +651,31 @@ def run_agent_loop(
         if branch_resp and branch_resp.get("worktree_path"):
             repo_path = branch_resp["worktree_path"]
 
+        # Heartbeat thread: signals to the dispatcher watchdog that we are alive.
+        hb_stop = _start_heartbeat(gateway_url, task_id, agent_id, _auth_headers)
+        hb_stop_ref.append(hb_stop)
+
         for _iteration in range(max_iterations):
-            response = llm.call(
-                messages=messages,
-                system=system_prompt,
-                tools=GATEWAY_TOOLS,
-                run_id=run_id,
-                session=session,
-            )
+            try:
+                response = llm.call(
+                    messages=messages,
+                    system=system_prompt,
+                    tools=GATEWAY_TOOLS,
+                    run_id=run_id,
+                    session=session,
+                )
+            except Exception as exc:
+                _try_suspend_or_fail(
+                    orchestrator_url,
+                    task_id,
+                    agent_id,
+                    repo_path,
+                    gateway_url,
+                    http,
+                    _auth_headers,
+                    reason=f"llm_error:{type(exc).__name__}:{str(exc)[:200]}",
+                )
+                return _finish("suspended")
 
             if response.stop_reason == "end_turn":
                 # Agent finished without calling task_complete.

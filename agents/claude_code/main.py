@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 from pathlib import Path
 
 import httpx
@@ -161,10 +162,16 @@ Command to emit TASK_DISCOVERED (fill in the placeholders):
 After emitting: do NOT write the out-of-scope files. Commit any in-scope work, then exit.
 """
 
-    # Resumption context — prepended when this is a re-run after child task completion.
+    # Resumption context — prepended when this is a re-run.
+    # Suspension resumes show the commits already on the branch; blocked resumes
+    # (child task completed) show the existing checkpoint summary.
     resumption_section = ""
-    if pkg.get("is_resumption"):
-        cp = pkg.get("checkpoint") or {}
+    checkpoint_data = pkg.get("checkpoint") or {}
+    if pkg.get("is_resumption") and checkpoint_data.get("type") == "suspension":
+        rc = pkg.get("resume_context") or {}
+        resumption_section = f"## RESUMING INTERRUPTED TASK\n\n{rc.get('instruction', '')}\n\n"
+    elif pkg.get("is_resumption"):
+        cp = checkpoint_data
         child_outputs: list[dict] = pkg.get("child_outputs") or []
         lines = ["## Resumption context", ""]
         lines.append("You previously worked on this task and paused to let a child task complete.")
@@ -221,6 +228,38 @@ def _call(client: httpx.Client, method: str, url: str, **kwargs) -> dict:
     return resp.json()
 
 
+def _run_heartbeat(
+    gw_url: str,
+    task_id: str,
+    agent_id: str,
+    auth_hdrs: dict,
+    stop: threading.Event,
+    interval: int = 60,
+) -> None:
+    while not stop.wait(interval):
+        try:
+            with httpx.Client(timeout=10.0) as c:
+                c.post(
+                    f"{gw_url}/heartbeat",
+                    json={"task_id": task_id, "agent_id": agent_id},
+                    headers=auth_hdrs,
+                )
+        except Exception:
+            pass  # best-effort; missing heartbeat only delays watchdog detection
+
+
+def _start_heartbeat(
+    gw_url: str, task_id: str, agent_id: str, auth_hdrs: dict
+) -> threading.Event:
+    stop = threading.Event()
+    threading.Thread(
+        target=_run_heartbeat,
+        args=(gw_url, task_id, agent_id, auth_hdrs, stop),
+        daemon=True,
+    ).start()
+    return stop
+
+
 def _mark_failed(http: httpx.Client, orch_url: str, task_id: str, reason: str = "unknown") -> None:
     try:
         http.post(
@@ -235,6 +274,95 @@ def _mark_failed(http: httpx.Client, orch_url: str, task_id: str, reason: str = 
         log.info("Task %s marked failed: %s", task_id, reason)
     except Exception as exc:
         log.warning("Could not mark task %s as failed: %s", task_id, exc)
+
+
+def _mark_suspended(
+    http: httpx.Client,
+    gw_url: str,
+    orch_url: str,
+    task_id: str,
+    task_owner: str,
+    repo_path: str,
+    auth_hdrs: dict,
+    reason: str,
+) -> None:
+    """Flush uncommitted files, then suspend or fail the task.
+
+    If partial commits exist on the branch → transition running → suspended and
+    store the branch name + commit list in task.checkpoint so the agent can be
+    resumed from the last commit.
+
+    If no commits exist on the branch → there is nothing to resume from, so we
+    fall back to a normal failure so the retry mechanism can start fresh.
+    """
+    # 1. Commit any dirty / staged files so work is not lost.
+    try:
+        dirty = subprocess.check_output(
+            ["git", "diff", "--name-only", "HEAD"], cwd=repo_path, text=True
+        ).splitlines()
+        staged = subprocess.check_output(
+            ["git", "diff", "--cached", "--name-only"], cwd=repo_path, text=True
+        ).splitlines()
+        flush_paths = list({p.strip() for p in dirty + staged if p.strip()})
+        if flush_paths:
+            http.post(
+                f"{gw_url}/git/commit",
+                json={
+                    "agent_id": task_owner,
+                    "task_id": task_id,
+                    "repo_path": repo_path,
+                    "message": f"[{task_id}] partial work before suspension",
+                    "paths": flush_paths,
+                },
+                headers=auth_hdrs,
+            )
+    except Exception as exc:
+        log.warning("Failed to flush partial work before suspension: %s", exc)
+
+    # 2. Count commits ahead of main.
+    try:
+        log_out = subprocess.check_output(
+            ["git", "log", "main..HEAD", "--oneline"], cwd=repo_path, text=True
+        )
+        commits = [ln.strip() for ln in log_out.splitlines() if ln.strip()]
+    except Exception:
+        commits = []
+
+    if not commits:
+        # Nothing to resume from — treat as a normal failure.
+        log.info("Task %s: no commits on branch, falling back to failed", task_id)
+        _mark_failed(http, orch_url, task_id, reason)
+        return
+
+    # 3. Read current branch name.
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_path, text=True
+        ).strip()
+    except Exception:
+        branch = ""
+
+    # 4. Transition running → suspended with checkpoint.
+    try:
+        http.post(
+            f"{orch_url}/tasks/{task_id}/transition",
+            json={
+                "new_status": "suspended",
+                "actor": "claude-code-agent",
+                "payload": {"suspension_reason": reason},
+                "details": {
+                    "checkpoint": {
+                        "type": "suspension",
+                        "suspended_branch": branch,
+                        "partial_commits": commits,
+                        "reason": reason,
+                    }
+                },
+            },
+        )
+        log.info("Task %s suspended: branch=%s commits=%d", task_id, branch, len(commits))
+    except Exception as exc:
+        log.warning("Could not suspend task %s: %s", task_id, exc)
 
 
 @app.command()
@@ -289,6 +417,9 @@ def main(
             )
             raise typer.Exit(1)
 
+        # ── 1.5. Start heartbeat thread ────────────────────────────────────
+        hb_stop = _start_heartbeat(gw_url, task_id, task_owner, _auth_hdrs)
+
         # ── 2. Run Claude Code ─────────────────────────────────────────────
         instruction = _build_instruction(pkg, repo_path)
         log.info("Launching claude CLI (timeout 1800s)...")
@@ -305,15 +436,21 @@ def main(
                 timeout=1800,
             )
         except FileNotFoundError:
+            hb_stop.set()
             log.error("'claude' CLI not found. Install Claude Code and run `claude login`.")
             _mark_failed(http, orch_url, task_id, "claude_cli:not_found")
             raise typer.Exit(1)
         except subprocess.TimeoutExpired:
+            hb_stop.set()
             log.error("claude CLI timed out after 1800s")
-            _mark_failed(http, orch_url, task_id, "claude_cli:timeout:1800s")
+            _mark_suspended(
+                http, gw_url, orch_url, task_id, task_owner, repo_path,
+                _auth_hdrs, "claude_cli:timeout:1800s",
+            )
             raise typer.Exit(1)
 
         if result.returncode != 0:
+            hb_stop.set()
             _stderr = (result.stderr or "").strip()
             _stdout = (result.stdout or "").strip()
             _hint = (_stderr or _stdout)[:300]
@@ -323,11 +460,9 @@ def main(
                 result.stderr[:2000],
                 result.stdout[:500],
             )
-            _mark_failed(
-                http,
-                orch_url,
-                task_id,
-                f"claude_cli:exit_{result.returncode}:{_hint}",
+            _mark_suspended(
+                http, gw_url, orch_url, task_id, task_owner, repo_path,
+                _auth_hdrs, f"claude_cli:exit_{result.returncode}:{_hint}",
             )
             raise typer.Exit(1)
 
@@ -383,6 +518,7 @@ def main(
                     log.info("Partial work committed: %s", partial)
                 except Exception as exc:
                     log.warning("Failed to commit partial work (non-fatal): %s", exc)
+            hb_stop.set()
             raise typer.Exit(0)
 
         # ── 3. Collect changed files ───────────────────────────────────────
@@ -429,6 +565,7 @@ def main(
             )
 
         if not changed_paths:
+            hb_stop.set()
             log.warning("claude exited 0 but no files changed; marking task failed")
             _mark_failed(http, orch_url, task_id, "no_files_changed")
             raise typer.Exit(1)
@@ -453,6 +590,7 @@ def main(
             sha = resp.get("sha", "?")
             log.info("Committed: sha=%s", sha)
         except httpx.HTTPStatusError as exc:
+            hb_stop.set()
             log.error("Commit failed: %s", exc.response.text)
             _mark_failed(
                 http,
@@ -488,6 +626,7 @@ def main(
             log.warning("File-write audit emit failed (non-fatal): %s", exc)
 
         # ── 5. Transition task to completed ───────────────────────────────
+        hb_stop.set()
         try:
             _call(
                 http,

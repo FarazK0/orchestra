@@ -226,8 +226,33 @@ class MemorySearchResponse(BaseModel):
     results: list[MemorySearchResult]
 
 
+class HeartbeatBody(BaseModel):
+    task_id: str
+    agent_id: str
+
+
 # Platform actors allowed to bypass the running-task check and write any memory type.
 _PLATFORM_ACTORS: frozenset[str] = frozenset({"dispatcher", "root-agent"})
+
+# ---------------------------------------------------------------------------
+# Best-effort Redis client for heartbeat keys
+# ---------------------------------------------------------------------------
+
+_redis_client = None
+
+
+def _get_redis():
+    global _redis_client
+    if _redis_client is None:
+        try:
+            import redis as _redis
+
+            from orchestrator.orchestrator.streams import get_redis_url
+
+            _redis_client = _redis.from_url(get_redis_url())
+        except Exception:
+            pass
+    return _redis_client
 
 # ---------------------------------------------------------------------------
 # Best-effort Redis publish for TASK_DISCOVERED events
@@ -289,6 +314,28 @@ def _git(args: list[str], cwd: Path, timeout: int = 30) -> subprocess.CompletedP
 @app.get("/healthz")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.post("/heartbeat")
+def heartbeat(
+    body: HeartbeatBody,
+    session: SessionDep,
+    authorization: str | None = Header(default=None),
+) -> dict[str, bool]:
+    """Record an agent heartbeat. Sets a TTL key in Redis; used by the dispatcher
+    watchdog to detect stale running tasks.  Audited via check_active_run."""
+    try:
+        verify_capability_header(authorization)
+        check_active_run(session, body.agent_id, body.task_id)
+    except PermissionDeniedError as exc:
+        raise _deny(exc)
+    r = _get_redis()
+    if r is not None:
+        try:
+            r.setex(f"task:{body.task_id}:heartbeat", 180, "1")
+        except Exception:
+            pass  # best-effort; missing heartbeat only delays watchdog detection
+    return {"ok": True}
 
 
 @app.post("/read_artifact", response_model=ArtifactReadResponse)

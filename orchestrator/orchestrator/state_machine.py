@@ -38,11 +38,17 @@ TRANSITIONS: dict[tuple[str, str], str] = {
     # v0.3 adaptive lifecycle: parent suspends while child work runs, then resumes
     ("running", "blocked"): "TASK_BLOCKED",
     ("blocked", "assigned"): "TASK_RESUMED",
+    # Involuntary suspension: agent interrupted mid-run (API down, killed, no credits)
+    # Resume via `orchctl resume` — continues on the same branch from last commit.
+    ("running", "suspended"): "TASK_SUSPENDED",
+    ("suspended", "assigned"): "TASK_ASSIGNED",   # reused; dispatcher handles normally
+    ("suspended", "completed"): "TASK_RECOVER",   # manual override if work was done
     # Cancel from any non-terminal state
     ("created", "cancelled"): "TASK_CANCELLED",
     ("assigned", "cancelled"): "TASK_CANCELLED",
     ("running", "cancelled"): "TASK_CANCELLED",
     ("blocked", "cancelled"): "TASK_CANCELLED",
+    ("suspended", "cancelled"): "TASK_CANCELLED",
     ("completed", "cancelled"): "TASK_CANCELLED",
     ("validated", "cancelled"): "TASK_CANCELLED",
     ("failed", "cancelled"): "TASK_CANCELLED",

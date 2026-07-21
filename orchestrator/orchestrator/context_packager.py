@@ -219,10 +219,12 @@ def build_context_package(
 
     branch = f"agent/backend/{task_id}"
 
-    # v0.3 adaptive lifecycle: resumption context
+    # Resumption context: both v0.3 blocked resumptions and involuntary suspensions.
+    checkpoint_data = task.checkpoint or {}
     is_resumption = task.checkpoint is not None
+    is_suspension_resume = checkpoint_data.get("type") == "suspension"
     child_outputs: list[dict] = []
-    if is_resumption:
+    if is_resumption and not is_suspension_resume:
         children = (
             session.execute(select(Task).where(Task.parent_task_id == task_id)).scalars().all()
         )
@@ -236,6 +238,22 @@ def build_context_package(
             for c in children
             if c.status in TERMINAL_STATUSES
         ]
+
+    # Suspension resume_context: tells the agent about prior commits on the branch.
+    resume_context: dict | None = None
+    if is_suspension_resume:
+        commits = checkpoint_data.get("partial_commits", [])
+        commit_lines = "\n".join(f"  - {c}" for c in commits)
+        resume_context = {
+            "partial_commits": commits,
+            "instruction": (
+                "This task was previously interrupted and is being resumed. "
+                "The following commits are already on the branch:\n"
+                f"{commit_lines}\n\n"
+                "Check `git log` to understand the current state. "
+                "Continue from where the work left off — do NOT redo committed work."
+            ),
+        }
 
     pkg: dict = {
         "schema_version": 1,
@@ -262,11 +280,13 @@ def build_context_package(
             "write_scope": task.outputs,
             "acceptance_criteria": task.acceptance,
         },
-        # v0.3 resumption fields (always present so agents can check without KeyError)
+        # Resumption fields (always present so agents can check without KeyError)
         "is_resumption": is_resumption,
         "checkpoint": task.checkpoint,
         "child_outputs": child_outputs,
     }
+    if resume_context is not None:
+        pkg["resume_context"] = resume_context
     if agent_memory is not None:
         pkg["agent_memory"] = agent_memory
     return pkg
@@ -357,21 +377,24 @@ def create_run(
                     art["source_branch"] = dep_branch
                     art["found"] = True
 
-    # Derive branch from agent type.
-    # Resumed tasks get a -resume-N suffix so each resumption lands on a fresh branch;
-    # retried tasks keep the existing -retry-N convention.
+    # Derive branch from agent type and resumption kind.
+    # Suspension resumes reuse the ORIGINAL branch (partial commits already exist).
+    # Blocked resumes get a -resume-N suffix (fresh start after child task completes).
+    # Retried tasks get a -retry-N suffix. First runs get no suffix.
     agent_type = agent_id.removesuffix("-agent")
-    if package.get("is_resumption"):
+    checkpoint = package.get("checkpoint") or {}
+    if checkpoint.get("type") == "suspension" and checkpoint.get("suspended_branch"):
+        branch = checkpoint["suspended_branch"]
+    elif package.get("is_resumption"):
         run_count = (
             session.execute(select(func.count(Run.run_id)).where(Run.task_id == task_id)).scalar()
             or 0
         )
-        suffix = f"-resume-{run_count}"
+        branch = f"agent/{agent_type}/{task_id}-resume-{run_count}"
     elif retry_count > 0:
-        suffix = f"-retry-{retry_count}"
+        branch = f"agent/{agent_type}/{task_id}-retry-{retry_count}"
     else:
-        suffix = ""
-    branch = f"agent/{agent_type}/{task_id}{suffix}"
+        branch = f"agent/{agent_type}/{task_id}"
     package["agent_instructions"]["branch"] = branch
     package["agent_instructions"]["agent_id"] = agent_id
 

@@ -116,6 +116,8 @@ _STATUS_COLOURS = {
     "failed": "",
     "escalated": "",
     "cancelled": "",
+    "suspended": "",
+    "blocked": "",
 }
 
 
@@ -712,6 +714,35 @@ def recover(
         )
     _handle_error(resp)
     typer.echo(f"{task_id}: escalated -> completed. Run 'validate' next.")
+
+
+@app.command("resume")
+def resume(
+    task_id: str = typer.Argument(..., help="Task ID to resume, e.g. TASK-007."),
+    note: str = typer.Option("", "--note", "-n", help="Optional note recorded in the audit log."),
+) -> None:
+    """Resume a suspended task from its last committed checkpoint.
+
+    \b
+    The agent will receive the list of commits already made and will continue
+    from where it left off rather than starting from scratch.
+    The task must be in 'suspended' status.
+    """
+    with _client() as c:
+        resp = c.get(f"/tasks/{task_id}")
+    _handle_error(resp)
+    task = resp.json()
+    if task["status"] != "suspended":
+        typer.echo(f"Error: {task_id} is {task['status']!r}, not 'suspended'.", err=True)
+        raise typer.Exit(1)
+
+    with _client() as c:
+        resp = c.post(
+            f"/tasks/{task_id}/transition",
+            json={"new_status": "assigned", "actor": "human", "details": {"resume_note": note}},
+        )
+    _handle_error(resp)
+    typer.echo(f"{task_id}: suspended -> assigned. Dispatcher will re-launch the agent.")
 
 
 @app.command("review")
