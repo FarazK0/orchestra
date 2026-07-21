@@ -118,6 +118,7 @@ _STATUS_COLOURS = {
     "cancelled": "",
     "suspended": "",
     "blocked": "",
+    "awaiting_human": "",
 }
 
 
@@ -654,6 +655,35 @@ def _handle_task(task: dict, repo: str, gw: str) -> None:
             else:
                 typer.echo("  Skipped — task stays validated.")
 
+    elif status == "awaiting_human":
+        cp = task.get("checkpoint") or {}
+        typer.echo(f"\n  {_r('Awaiting your input')} ({cp.get('question_type', '?')}):")
+        typer.echo(f"  {_b('Q:')} {cp.get('question', '(no question recorded)')}")
+        choices = cp.get("choices") or []
+        for i, choice_text in enumerate(choices):
+            typer.echo(f"    {i + 1}. {choice_text}")
+        if cp.get("context"):
+            typer.echo(f"  Context: {_d(cp['context'])}")
+        if cp.get("current_progress"):
+            typer.echo(f"  Progress so far: {_d(cp['current_progress'])}")
+        response = typer.prompt("\n  Your answer (Enter to skip)").strip()
+        if response:
+            with _client() as c:
+                r = c.post(
+                    f"/tasks/{task_id}/respond",
+                    json={"response": response, "actor": "human"},
+                )
+            if not r.is_error:
+                typer.echo(f"  {_g('Response recorded.')} Dispatcher will re-launch the agent.")
+            else:
+                try:
+                    detail = r.json().get("detail", r.text)
+                except Exception:
+                    detail = r.text
+                typer.echo(f"  {_r('Error:')} {detail}", err=True)
+        else:
+            typer.echo("  Skipped — task stays awaiting_human.")
+
     elif status == "failed":
         typer.echo(f"\n  {_r('Failed.')} The dispatcher will retry or escalate.")
 
@@ -745,6 +775,67 @@ def resume(
     typer.echo(f"{task_id}: suspended -> assigned. Dispatcher will re-launch the agent.")
 
 
+@app.command("questions")
+def questions() -> None:
+    """List tasks waiting for human input.
+
+    \b
+    Shows each task's question, choices (if any), and context.
+    Use 'orchctl respond TASK-ID "answer"' to reply.
+    """
+    with _client() as c:
+        resp = c.get("/tasks", params={"status": ["awaiting_human"]})
+    _handle_error(resp)
+    tasks = resp.json()
+    if not tasks:
+        typer.echo("No tasks awaiting human input.")
+        return
+    for t in tasks:
+        cp = t.get("checkpoint") or {}
+        typer.echo(f"\n  {_b(t['id'])}  {_d(t['owner'])}")
+        typer.echo(f"  {t['title']}")
+        typer.echo(f"  Type: {cp.get('question_type', '?')}")
+        typer.echo(f"  {_b('Q:')} {cp.get('question', '(no question recorded)')}")
+        choices = cp.get("choices") or []
+        for i, choice_text in enumerate(choices):
+            typer.echo(f"    {i + 1}. {choice_text}")
+        if cp.get("context"):
+            typer.echo(f"  Context: {_d(cp['context'])}")
+        if cp.get("current_progress"):
+            typer.echo(f"  Progress: {_d(cp['current_progress'])}")
+    n = len(tasks)
+    typer.echo(f"\n  {n} task(s) awaiting input.  Run: orchctl respond TASK-ID \"answer\"")
+
+
+@app.command("respond")
+def respond(
+    task_id: str = typer.Argument(..., help="Task ID, e.g. TASK-007."),
+    response: str = typer.Argument(..., help="Your answer to the agent's question."),
+    actor: str = typer.Option("human", help="Actor name recorded in the audit log."),
+) -> None:
+    """Answer a question from an agent waiting for human input.
+
+    \b
+    The agent will be restarted with your response injected into its context
+    and continue from where it left off.
+    Use 'orchctl questions' to see what tasks are waiting.
+    """
+    with _client() as c:
+        resp = c.get(f"/tasks/{task_id}")
+    _handle_error(resp)
+    task = resp.json()
+    if task["status"] != "awaiting_human":
+        typer.echo(f"Error: {task_id} is {task['status']!r}, not 'awaiting_human'.", err=True)
+        raise typer.Exit(1)
+    cp = task.get("checkpoint") or {}
+    typer.echo(f"\n  Question: {cp.get('question', '?')}")
+    typer.echo(f"  Your answer: {response}\n")
+    with _client() as c:
+        resp = c.post(f"/tasks/{task_id}/respond", json={"response": response, "actor": actor})
+    _handle_error(resp)
+    typer.echo(f"{task_id}: response recorded. Dispatcher will re-launch the agent.")
+
+
 @app.command("review")
 def review(
     repo: str = typer.Option(..., "--repo", "-r", help="Managed repo path."),
@@ -767,7 +858,7 @@ def review(
 
     _TERMINAL = {"closed", "failed", "escalated", "cancelled"}
     _ACTIVE = {"created", "assigned", "running", "completed", "validated"}
-    _PENDING = {"completed", "validated"}
+    _PENDING = {"completed", "validated", "awaiting_human"}
 
     try:
         while True:
@@ -785,6 +876,8 @@ def review(
             done = all(t["status"] in _TERMINAL for t in tasks)
 
             # Present each pending task once (or re-present if it moved to validated).
+            # awaiting_human tasks are re-presented if the human skipped them last time
+            # (seen key changes only on status change, not on repeated skip).
             new_tasks = [t for t in pending if f"{t['id']}:{t['status']}" not in seen]
 
             if new_tasks:

@@ -30,6 +30,8 @@ class TaskStatus(str, Enum):
     assigned = "assigned"
     running = "running"
     blocked = "blocked"
+    suspended = "suspended"
+    awaiting_human = "awaiting_human"
     completed = "completed"
     validated = "validated"
     merged = "merged"

@@ -216,6 +216,11 @@ class ReplanRequest(BaseModel):
     reason: str
 
 
+class HumanResponseRequest(BaseModel):
+    response: str
+    actor: str = "human"
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
@@ -329,6 +334,41 @@ def transition_task(
         if validated_event is not None:
             latency = (datetime.now(timezone.utc) - validated_event.emitted_at).total_seconds()
             human_queue_latency_seconds.labels(owner=task.owner).observe(latency)
+    return TaskSchema.model_validate(task)
+
+
+@app.post("/tasks/{task_id}/respond", response_model=TaskSchema)
+def respond_to_task(
+    task_id: str,
+    body: HumanResponseRequest,
+    session: SessionDep,
+    bg: BackgroundTasks,
+) -> TaskSchema:
+    """Supply a human answer to a task waiting in 'awaiting_human' state.
+
+    Stores the response in task.checkpoint["human_response"], then transitions
+    the task back to 'assigned' so the dispatcher re-launches the agent with
+    the answer injected into context.
+    """
+    task = _task_or_404(session, task_id)
+    if task.status != "awaiting_human":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Task {task_id!r} is {task.status!r}, not 'awaiting_human'",
+        )
+    checkpoint = dict(task.checkpoint or {})
+    checkpoint["human_response"] = body.response
+    task.checkpoint = checkpoint
+    session.flush()
+    event = transition(
+        session,
+        task_id,
+        "assigned",
+        actor=body.actor,
+        payload={"human_response": body.response[:200]},
+    )
+    bg.add_task(_try_publish, str(event.event_id), event.event_type, task_id, event.payload)
+    tasks_total.labels(new_status="assigned", owner=task.owner).inc()
     return TaskSchema.model_validate(task)
 
 

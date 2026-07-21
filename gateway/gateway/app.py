@@ -231,6 +231,16 @@ class HeartbeatBody(BaseModel):
     agent_id: str
 
 
+class HumanInputRequest(BaseModel):
+    agent_id: str
+    task_id: str
+    question_type: str  # "choice" | "question" | "blocker" | "approval"
+    question: str
+    choices: list[str] = []
+    context: str = ""
+    current_progress: str = ""
+
+
 # Platform actors allowed to bypass the running-task check and write any memory type.
 _PLATFORM_ACTORS: frozenset[str] = frozenset({"dispatcher", "root-agent"})
 
@@ -336,6 +346,67 @@ def heartbeat(
         except Exception:
             pass  # best-effort; missing heartbeat only delays watchdog detection
     return {"ok": True}
+
+
+@app.post("/human_input/request")
+def human_input_request(
+    body: HumanInputRequest,
+    session: SessionDep,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Agent calls this when it needs human input to proceed.
+
+    Persists the question in task.checkpoint, transitions the task to
+    awaiting_human, and writes an audit record. The agent should then exit
+    cleanly; the dispatcher will re-launch it after the human responds.
+    """
+    try:
+        verify_capability_header(authorization)
+        run, _ = check_active_run(session, body.agent_id, body.task_id)
+    except PermissionDeniedError as exc:
+        raise _deny(exc)
+
+    from orchestrator.orchestrator.state_machine import (
+        InvalidTransitionError,
+        transition as sm_transition,
+    )
+
+    task = session.get(TaskORM, body.task_id)
+    task.checkpoint = {
+        "type": "awaiting_human",
+        "paused_branch": run.branch,
+        "question_type": body.question_type,
+        "question": body.question,
+        "choices": body.choices,
+        "context": body.context,
+        "current_progress": body.current_progress,
+        "human_response": None,
+    }
+    try:
+        sm_transition(
+            session,
+            body.task_id,
+            "awaiting_human",
+            actor=body.agent_id,
+            payload={
+                "question_type": body.question_type,
+                "question": body.question[:200],
+            },
+        )
+    except InvalidTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    write_gateway_audit(
+        session,
+        actor=body.agent_id,
+        operation="human_input_request",
+        task_id=body.task_id,
+        details={
+            "question_type": body.question_type,
+            "question": body.question[:200],
+            "choices": body.choices,
+        },
+    )
+    return {"ok": True, "status": "awaiting_human"}
 
 
 @app.post("/read_artifact", response_model=ArtifactReadResponse)

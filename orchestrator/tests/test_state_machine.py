@@ -88,6 +88,10 @@ def _do_transition(session, task_id, new_status, actor="test-agent"):
         ("suspended", "assigned", "TASK_ASSIGNED"),
         ("suspended", "cancelled", "TASK_CANCELLED"),
         ("suspended", "completed", "TASK_RECOVER"),
+        # Human-in-the-loop escalation
+        ("running", "awaiting_human", "TASK_HUMAN_INPUT_REQUIRED"),
+        ("awaiting_human", "assigned", "TASK_ASSIGNED"),
+        ("awaiting_human", "cancelled", "TASK_CANCELLED"),
     ],
 )
 def test_valid_transition(session, from_status, to_status, expected_event_type):
@@ -144,6 +148,10 @@ def test_transition_covers_all_defined_edges():
         ("running", "suspended"),
         ("suspended", "assigned"),
         ("suspended", "completed"),
+        # Human-in-the-loop escalation
+        ("running", "awaiting_human"),
+        ("awaiting_human", "assigned"),
+        ("awaiting_human", "cancelled"),
     }
     assert tested == set(TRANSITIONS.keys())
 

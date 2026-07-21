@@ -33,6 +33,10 @@ class _TaskDiscovered(Exception):
     """Raised by _execute_gateway_tool when the agent calls discover_task."""
 
 
+class _HumanInputRequired(Exception):
+    """Raised by _execute_gateway_tool when the agent calls request_human_input."""
+
+
 GATEWAY_TOOLS: list[dict[str, Any]] = [
     {
         "name": "read_artifact",
@@ -206,6 +210,46 @@ GATEWAY_TOOLS: list[dict[str, Any]] = [
             "required": ["title", "reason", "owner_hint", "outputs", "checkpoint"],
         },
     },
+    {
+        "name": "request_human_input",
+        "description": (
+            "Pause this task and ask the human a question. Use when you hit an issue, "
+            "need to choose between approaches, or require explicit approval before proceeding. "
+            "The task will resume after the human responds — your progress is preserved. "
+            "ONLY use when you genuinely cannot proceed without human guidance."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question_type": {
+                    "type": "string",
+                    "enum": ["choice", "question", "blocker", "approval"],
+                    "description": (
+                        "choice: pick from options; question: open answer; "
+                        "blocker: cannot proceed; approval: confirm risky action"
+                    ),
+                },
+                "question": {
+                    "type": "string",
+                    "description": "Clear, specific question for the human.",
+                },
+                "choices": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "For question_type='choice': the options to present.",
+                },
+                "context": {
+                    "type": "string",
+                    "description": "Why you need this input; what you have already tried.",
+                },
+                "current_progress": {
+                    "type": "string",
+                    "description": "What you have done so far (used to resume after the human answers).",
+                },
+            },
+            "required": ["question_type", "question", "context", "current_progress"],
+        },
+    },
 ]
 
 
@@ -337,6 +381,11 @@ def _format_resumption_section(pkg: dict) -> list[str]:
     if checkpoint_data.get("type") == "suspension":
         rc = pkg.get("resume_context") or {}
         return ["## RESUMING INTERRUPTED TASK", "", rc.get("instruction", ""), ""]
+
+    # Human-input resume: agent asked a question; human has answered.
+    if checkpoint_data.get("type") == "awaiting_human" and checkpoint_data.get("human_response"):
+        rc = pkg.get("resume_context") or {}
+        return ["## HUMAN INPUT RECEIVED", "", rc.get("instruction", ""), ""]
 
     # Blocked resume: parent task resumes after child task completed.
     cp = checkpoint_data
@@ -593,6 +642,24 @@ def _execute_gateway_tool(
         )
         raise _TaskDiscovered()
 
+    if name == "request_human_input":
+        _call_gateway(
+            http,
+            gateway_url,
+            "/human_input/request",
+            {
+                "agent_id": agent_id,
+                "task_id": task_id,
+                "question_type": tool_input["question_type"],
+                "question": tool_input["question"],
+                "choices": tool_input.get("choices", []),
+                "context": tool_input.get("context", ""),
+                "current_progress": tool_input.get("current_progress", ""),
+            },
+            headers=hdrs,
+        )
+        raise _HumanInputRequired()
+
     return f"Unknown tool: {name}"
 
 
@@ -751,6 +818,9 @@ def run_agent_loop(
                 except _TaskDiscovered:
                     # Agent requested work discovery — exit this run cleanly.
                     return _finish("blocked")
+                except _HumanInputRequired:
+                    # Agent asked for human guidance — task is now awaiting_human.
+                    return _finish("awaiting_human")
                 except httpx.HTTPStatusError as exc:
                     result_text = f"Gateway error {exc.response.status_code}: {exc.response.text}"
 

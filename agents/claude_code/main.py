@@ -162,14 +162,47 @@ Command to emit TASK_DISCOVERED (fill in the placeholders):
 After emitting: do NOT write the out-of-scope files. Commit any in-scope work, then exit.
 """
 
+    capability_token: str = pkg.get("capability_token", "")
+    auth_header_line = (
+        f"      -H 'Authorization: Bearer {capability_token}' \\\n" if capability_token else ""
+    )
+
+    human_input_section = f"""
+## Requesting human input (use ONLY when genuinely blocked)
+
+If you cannot proceed without human guidance — a blocking choice, missing info, risky action:
+
+Step 1 — commit any in-progress work first (use the git commit block above).
+
+Step 2 — call the gateway:
+
+  curl -s -X POST http://localhost:8081/human_input/request \\
+      -H 'Content-Type: application/json' \\
+{auth_header_line}      -d '{{
+        "agent_id": "{task_owner}",
+        "task_id": "{task_id_val}",
+        "question_type": "choice|question|blocker|approval",
+        "question": "<clear, specific question for the human>",
+        "choices": ["<option A>", "<option B>"],
+        "context": "<why you need this; what you have already tried>",
+        "current_progress": "<what you have done so far>"
+      }}'
+
+Step 3 — EXIT IMMEDIATELY after calling this. Do not write more files. Do not continue working.
+The human will answer and you will be restarted with their response injected into context.
+"""
+
     # Resumption context — prepended when this is a re-run.
-    # Suspension resumes show the commits already on the branch; blocked resumes
-    # (child task completed) show the existing checkpoint summary.
+    # Suspension resumes show the commits already on the branch; human-input resumes show
+    # the original question and the human's answer; blocked resumes show the checkpoint summary.
     resumption_section = ""
     checkpoint_data = pkg.get("checkpoint") or {}
     if pkg.get("is_resumption") and checkpoint_data.get("type") == "suspension":
         rc = pkg.get("resume_context") or {}
         resumption_section = f"## RESUMING INTERRUPTED TASK\n\n{rc.get('instruction', '')}\n\n"
+    elif pkg.get("is_resumption") and checkpoint_data.get("type") == "awaiting_human":
+        rc = pkg.get("resume_context") or {}
+        resumption_section = f"## HUMAN INPUT RECEIVED\n\n{rc.get('instruction', '')}\n\n"
     elif pkg.get("is_resumption"):
         cp = checkpoint_data
         child_outputs: list[dict] = pkg.get("child_outputs") or []
@@ -209,7 +242,7 @@ Your work will be committed to branch `{branch}` (already checked out for you).
 ## Input files
 
 {inputs_list}
-{artifact_section}{memory_section}{dag_section}{discovery_section}
+{artifact_section}{memory_section}{dag_section}{discovery_section}{human_input_section}
 ## Rules
 
 - Work only within {repo_path}. Do not create files outside it.
@@ -468,7 +501,22 @@ def main(
 
         log.info("claude CLI finished successfully")
 
-        # ── 2.5. Check for task discovery ─────────────────────────────────
+        # ── 2.5. Check if agent requested human input ─────────────────────
+        # The claude CLI may have called POST /human_input/request; if so the task
+        # is already awaiting_human — exit cleanly, not a failure.
+        try:
+            task_state_resp = http.get(f"{orch_url}/tasks/{task_id}")
+            task_state_resp.raise_for_status()
+            if task_state_resp.json().get("status") == "awaiting_human":
+                log.info("Task %s is awaiting_human — agent requested human input", task_id)
+                hb_stop.set()
+                raise typer.Exit(0)
+        except typer.Exit:
+            raise
+        except Exception as exc:
+            log.warning("Could not check awaiting_human status (non-fatal): %s", exc)
+
+        # ── 2.6. Check for task discovery ─────────────────────────────────
         # If the agent emitted TASK_DISCOVERED, exit cleanly — not a failure.
         # The Scheduler (in Dispatcher) will block this task and create the child.
         task_discovered = False

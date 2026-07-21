@@ -43,12 +43,17 @@ TRANSITIONS: dict[tuple[str, str], str] = {
     ("running", "suspended"): "TASK_SUSPENDED",
     ("suspended", "assigned"): "TASK_ASSIGNED",   # reused; dispatcher handles normally
     ("suspended", "completed"): "TASK_RECOVER",   # manual override if work was done
+    # Human-in-the-loop escalation: agent pauses to ask the human a question/choice.
+    # Resume via `orchctl respond` — human answer injected into next run's context.
+    ("running", "awaiting_human"): "TASK_HUMAN_INPUT_REQUIRED",
+    ("awaiting_human", "assigned"): "TASK_ASSIGNED",   # reused; dispatcher re-launches
     # Cancel from any non-terminal state
     ("created", "cancelled"): "TASK_CANCELLED",
     ("assigned", "cancelled"): "TASK_CANCELLED",
     ("running", "cancelled"): "TASK_CANCELLED",
     ("blocked", "cancelled"): "TASK_CANCELLED",
     ("suspended", "cancelled"): "TASK_CANCELLED",
+    ("awaiting_human", "cancelled"): "TASK_CANCELLED",
     ("completed", "cancelled"): "TASK_CANCELLED",
     ("validated", "cancelled"): "TASK_CANCELLED",
     ("failed", "cancelled"): "TASK_CANCELLED",

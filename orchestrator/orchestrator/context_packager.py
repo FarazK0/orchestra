@@ -219,12 +219,16 @@ def build_context_package(
 
     branch = f"agent/backend/{task_id}"
 
-    # Resumption context: both v0.3 blocked resumptions and involuntary suspensions.
+    # Resumption context: blocked resumptions, involuntary suspensions, human-input resumes.
     checkpoint_data = task.checkpoint or {}
     is_resumption = task.checkpoint is not None
     is_suspension_resume = checkpoint_data.get("type") == "suspension"
+    is_human_input_resume = (
+        checkpoint_data.get("type") == "awaiting_human"
+        and checkpoint_data.get("human_response") is not None
+    )
     child_outputs: list[dict] = []
-    if is_resumption and not is_suspension_resume:
+    if is_resumption and not is_suspension_resume and not is_human_input_resume:
         children = (
             session.execute(select(Task).where(Task.parent_task_id == task_id)).scalars().all()
         )
@@ -252,6 +256,25 @@ def build_context_package(
                 f"{commit_lines}\n\n"
                 "Check `git log` to understand the current state. "
                 "Continue from where the work left off — do NOT redo committed work."
+            ),
+        }
+    elif is_human_input_resume:
+        q = checkpoint_data.get("question", "")
+        choices_text = ""
+        if checkpoint_data.get("choices"):
+            choices_text = "\nOptions you presented:\n" + "\n".join(
+                f"  {i + 1}. {c}" for i, c in enumerate(checkpoint_data["choices"])
+            )
+        resume_context = {
+            "question": q,
+            "human_response": checkpoint_data["human_response"],
+            "instruction": (
+                "You previously paused to ask the human a question.\n\n"
+                f"Your question: {q}{choices_text}\n\n"
+                f"Human's answer: {checkpoint_data['human_response']}\n\n"
+                f"Your progress when you paused: "
+                f"{checkpoint_data.get('current_progress', '(not recorded)')}\n\n"
+                "Continue from where you left off using this answer. Do NOT ask again."
             ),
         }
 
@@ -385,6 +408,9 @@ def create_run(
     checkpoint = package.get("checkpoint") or {}
     if checkpoint.get("type") == "suspension" and checkpoint.get("suspended_branch"):
         branch = checkpoint["suspended_branch"]
+    elif checkpoint.get("type") == "awaiting_human" and checkpoint.get("human_response") is not None:
+        # Human-input resumes reuse the original branch (partial commits already there).
+        branch = checkpoint.get("paused_branch") or f"agent/{agent_type}/{task_id}"
     elif package.get("is_resumption"):
         run_count = (
             session.execute(select(func.count(Run.run_id)).where(Run.task_id == task_id)).scalar()
