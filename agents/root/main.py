@@ -451,10 +451,21 @@ def _seed_identity(
             log.warning("Staleness check failed for %s: %s", agent_id, exc)
             return
 
+    # Preserve accumulated domain expertise from existing identity if present.
+    expertise = "(none yet — updated as tasks complete)"
+    if existing:
+        old_content = existing[0].get("content", "")
+        if "## Domain expertise" in old_content:
+            after = old_content.split("## Domain expertise", 1)[1]
+            next_sec = after.find("\n## ")
+            raw = after[:next_sec].strip() if next_sec != -1 else after.strip()
+            if raw and raw != "(none yet — updated as tasks complete)":
+                expertise = raw
+
     content = (
         f"## Role\n{_role_for(agent_id)}\n\n"
-        f"## Project context\n{snapshot[:800]}\n\n"
-        f"## Most recent change request\n{description[:400]}"
+        f"## Domain expertise\n{expertise}\n\n"
+        f"## Project snapshot\n{snapshot[:600]}"
     )[:2000]
 
     try:

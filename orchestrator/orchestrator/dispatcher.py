@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session
 
 from .context_packager import create_run
 from .dag import TERMINAL_STATUSES, get_ready_successors, get_running_conflicts
-from .db import AuditRow, Event, Run, Task, get_engine, get_session_factory
+from .db import AgentMemory, AuditRow, Event, Run, Task, get_engine, get_session_factory
 from .scheduler import Scheduler
 from .state_machine import transition
 from .streams import ROOT_STREAM_KEY, STREAM_KEY, StreamConsumer, StreamPublisher
@@ -46,6 +46,92 @@ from .streams import ROOT_STREAM_KEY, STREAM_KEY, StreamConsumer, StreamPublishe
 log = logging.getLogger(__name__)
 
 _RECOVER_INTERVAL = 30  # call _recover_stale every this many consume_one iterations
+
+# ---------------------------------------------------------------------------
+# Domain expertise helpers (used by _discover_or_refresh_identity)
+# ---------------------------------------------------------------------------
+
+_DOMAIN_RULES: list[tuple] = [
+    (lambda f: "test" in f.lower() or f.startswith("test_"), "Testing"),
+    (lambda f: any(x in f.lower() for x in ["api", "route", "endpoint"]), "REST APIs"),
+    (lambda f: f.endswith((".html", ".css", ".js", ".ts")), "Frontend"),
+    (lambda f: "migration" in f.lower() or "alembic" in f.lower(), "DB migrations"),
+    (lambda f: any(x in f.lower() for x in ["model", "schema"]), "Data models"),
+    (lambda f: f.endswith(".py"), "Python"),
+]
+
+_AGENT_ROLES: dict[str, str] = {
+    "claude-code-agent": (
+        "You are the generalist engineer for this project. "
+        "You read existing code before writing, follow established patterns, "
+        "and keep changes minimal. You handle any layer (backend, frontend, tests) as needed."
+    ),
+    "backend-agent": (
+        "You are the backend specialist for this project. "
+        "You implement server-side logic, APIs, data models, and database interactions."
+    ),
+    "frontend-agent": (
+        "You are the frontend specialist for this project. "
+        "You implement HTML, CSS, and JavaScript UI components."
+    ),
+    "qa-agent": (
+        "You are the QA specialist for this project. "
+        "You write tests, check acceptance criteria, and verify correctness."
+    ),
+}
+
+
+def _extract_domain_tags(files: list[str]) -> list[str]:
+    """Map file paths to domain tags; return sorted, deduplicated list (max 8)."""
+    tags: set[str] = set()
+    for f in files:
+        for predicate, tag in _DOMAIN_RULES:
+            try:
+                if predicate(f):
+                    tags.add(tag)
+            except Exception:
+                pass
+    return sorted(tags)[:8]
+
+
+def _merge_expertise_section(content: str, new_tags: list[str], task_id: str) -> str:
+    """Insert new domain tags into the ## Domain expertise section of identity content."""
+    header = "## Domain expertise"
+
+    if header not in content:
+        insert = content.find("\n## Project")
+        if insert != -1:
+            prefix, suffix = content[:insert], content[insert:]
+        else:
+            prefix, suffix = content.rstrip(), ""
+        content = prefix + f"\n\n{header}\n" + suffix
+
+    before, after = content.split(header, 1)
+    next_sec = after.find("\n## ")
+    body, remainder = (after[:next_sec], after[next_sec:]) if next_sec != -1 else (after, "")
+
+    present: dict[str, str] = {}  # tag -> line
+    for line in body.strip().splitlines():
+        if line.startswith("- "):
+            tag = line[2:].split(" (")[0].strip()
+            present[tag] = line
+
+    for tag in new_tags:
+        if tag in present:
+            line = present[tag]
+            if task_id not in line:
+                present[tag] = (
+                    line.rstrip(")") + f", {task_id})"
+                    if "(from " in line
+                    else line + f" (from {task_id})"
+                )
+        else:
+            present[tag] = f"- {tag} (from {task_id})"
+
+    new_body = "\n" + "\n".join(present[t] for t in sorted(present)) + "\n"
+    rebuilt = before + header + new_body + remainder.lstrip("\n")
+    return rebuilt[:2000]
+
 
 # Maps agent_id to the Python module used to launch that agent.
 # Unknown agent_ids fall back to the backend agent.
@@ -356,6 +442,54 @@ class Dispatcher:
         except Exception as exc:
             log.warning("Failed to write episode memory for %s: %s", task_id, exc)
 
+    def _discover_or_refresh_identity(self, task_id: str, agent_id: str, session: Session) -> None:
+        """Append domain expertise tags to the agent's identity after a task completes."""
+        try:
+            audit_rows = session.query(AuditRow).filter(AuditRow.task_id == task_id).all()
+            files_written = [
+                r.details.get("path", "")
+                for r in audit_rows
+                if r.action == "gateway:write_artifact"
+            ]
+            new_tags = _extract_domain_tags([f for f in files_written if f])
+            if not new_tags:
+                return
+
+            existing = session.execute(
+                select(AgentMemory).where(
+                    AgentMemory.agent_id == agent_id,
+                    AgentMemory.project_id == "default",
+                    AgentMemory.key == "identity",
+                )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                role = _AGENT_ROLES.get(
+                    agent_id, f"You are a specialist agent ({agent_id}) for this project."
+                )
+                tag_lines = "\n".join(f"- {t} (from {task_id})" for t in new_tags)
+                content = (f"## Role\n{role}\n\n## Domain expertise\n{tag_lines}")[:2000]
+            else:
+                content = _merge_expertise_section(existing.content, new_tags, task_id)
+
+            resp = httpx.post(
+                f"{self._gateway_url}/memory/upsert",
+                json={
+                    "task_id": task_id,
+                    "agent_id": agent_id,
+                    "project_id": "default",
+                    "memory_type": "identity",
+                    "key": "identity",
+                    "content": content,
+                },
+                headers={"X-Platform-Actor": "dispatcher"},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            log.info("Identity expertise refreshed for %s after %s", agent_id, task_id)
+        except Exception as exc:
+            log.warning("Failed to refresh identity for %s: %s", agent_id, exc)
+
     def _on_task_discovered(self, task_id: str, session: Session) -> None:
         """Process a TASK_DISCOVERED event: create child task, block parent."""
         discovery_event = session.execute(
@@ -425,7 +559,10 @@ class Dispatcher:
 
     def _on_task_completed(self, task_id: str, session: Session) -> None:
         """Write episode memory, advance DAG successors, and unblock waiting parents."""
+        task = session.get(Task, task_id)
         self._write_episode_memory(task_id, session)
+        if task is not None:
+            self._discover_or_refresh_identity(task_id, task.owner, session)
         successors = get_ready_successors(task_id, session)
         for succ in successors:
             event = transition(session, succ.id, "assigned", actor="dispatcher")
@@ -525,10 +662,10 @@ class Dispatcher:
                         log.info("Recovered stale assigned task %s", task.id)
 
     # Heartbeat TTL must match the value used in gateway/app.py POST /heartbeat.
-    _HEARTBEAT_TTL = 180       # seconds — key expires after 3× the 60 s ping interval
+    _HEARTBEAT_TTL = 180  # seconds — key expires after 3× the 60 s ping interval
     # Minimum run age before we declare it stale (avoids suspending agents that
     # never managed to start their heartbeat thread before the watchdog checked).
-    _HEARTBEAT_GRACE = 360     # 6 min: 2× TTL plus buffer for slow agent startup
+    _HEARTBEAT_GRACE = 360  # 6 min: 2× TTL plus buffer for slow agent startup
 
     def _check_heartbeats(self) -> None:
         """Suspend running tasks whose heartbeat key has expired in Redis.
@@ -541,15 +678,16 @@ class Dispatcher:
         try:
             import redis as _redis
             from .streams import get_redis_url
+
             r = _redis.from_url(get_redis_url())
         except Exception:
             return  # Redis not available; skip watchdog this tick
 
         now = datetime.now(timezone.utc)
         with self._session_factory() as session:
-            running_tasks = session.execute(
-                select(Task).where(Task.status == "running")
-            ).scalars().all()
+            running_tasks = (
+                session.execute(select(Task).where(Task.status == "running")).scalars().all()
+            )
 
             for task in running_tasks:
                 try:
