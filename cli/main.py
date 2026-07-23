@@ -34,7 +34,7 @@ except Exception:
 
 app = typer.Typer(
     name="orchctl",
-    help="Orchestra control CLI — human interface to the orchestrator.",
+    help="Orchestra control CLI — human interface to the orchestrator.\n\nNew here? Run: orchctl quickstart",
     no_args_is_help=True,
 )
 
@@ -191,6 +191,48 @@ def validator_list() -> None:
         badge = " (always-on)" if always else ""
         typer.echo(f"  {v['name']:<{name_w}}  {auto:<5}  {v.get('description','')}{badge}")
     typer.echo("")
+
+
+# ---------------------------------------------------------------------------
+# quickstart
+# ---------------------------------------------------------------------------
+
+
+@app.command("quickstart")
+def quickstart() -> None:
+    """Print a getting-started cheat-sheet (works offline)."""
+    typer.echo(
+        """
+━━ Orchestra Quick Start ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Point Orchestra at your project:
+    export SANDBOX_REPO_PATH=/path/to/your-project
+    make setup       (first-time setup — starts all services)
+
+  Recommended: Claude Code UI
+    Open this repo in a Claude Code session, then:
+      /orcui                          show platform status + task list
+      /orcui what should I do next?   get a recommended action
+      /orcui request "add auth"       submit a change request
+      /arch-to-tasks spec.md          decompose a spec into tasks
+
+  Terminal
+    orchctl request "add auth"              submit a change request
+    orchctl list                            show all tasks
+    orchctl show TASK-001                   full detail + validation history
+    orchctl validate TASK-001 --repo PATH   run assigned validators
+    orchctl review --repo PATH              interactive approve loop
+    orchctl merge TASK-001 --repo PATH      merge validated branch
+
+  Platform
+    make setup    start all services       make stop    stop services
+    make logs     tail all logs            make install put orchctl on PATH globally
+
+  Help
+    orchctl COMMAND --help    command-specific help
+    cat CLAUDE.md             architecture, invariants, every command documented
+"""
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +568,7 @@ def validate(
     repo: str = typer.Option(..., "--repo", "-r", help="Absolute path to the managed Git repo."),
     actor: str = typer.Option("validator", help="Actor name recorded in the audit log."),
 ) -> None:
-    """Run the validator (ruff + pytest) on a completed task's agent branch.
+    """Run all assigned validators on a completed task's agent branch.
 
     \b
     The task must be in 'completed' status.

@@ -1,4 +1,4 @@
-.PHONY: up down migrate clean-db test lint demo demo-v2 dispatcher root-agent setup stop logs
+.PHONY: up down migrate clean-db test lint demo demo-v2 dispatcher root-agent setup stop logs install orchctl
 
 up:
 	docker compose up -d
@@ -44,3 +44,6 @@ stop:
 
 logs:
 	tail -f /tmp/orchestra/logs/*.log
+
+install:
+	uv tool install --editable .

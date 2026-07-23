@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# orchctl — convenience wrapper for the Orchestra CLI.
+#
+# Works immediately after `uv sync` without any global install.
+# For a persistent global install (so `orchctl` works from any directory):
+#   make install
+set -e
+REPO_ROOT="$(cd "$(dirname "$(realpath "$0")")" && pwd)"
+exec "$REPO_ROOT/.venv/bin/python" -m cli.main "$@"
