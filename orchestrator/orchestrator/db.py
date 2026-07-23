@@ -52,6 +52,7 @@ class Task(Base):
     inputs: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     outputs: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     acceptance: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    validators: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     risk_tier: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     budget: Mapped[dict] = mapped_column(JSONB, nullable=False)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

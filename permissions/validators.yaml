@@ -1,0 +1,58 @@
+version: 1
+# Validator registry for Orchestra.
+#
+# Built-in validators (builtin: key) are implemented in validator.py.
+# Shell validators (command: key) run the command in the repo directory.
+#
+# Fields:
+#   description   : shown in 'orchctl validator list' and task creation prompt
+#   builtin       : name of the Python handler (file_exists, llm_acceptance)
+#   command       : shell command run in repo root (mutually exclusive with builtin)
+#   match_extensions: list of file extensions that trigger auto-selection
+#   match_paths   : list of path prefix/suffix patterns for auto-selection
+#   auto_detect   : false = opt-in only (not suggested at task creation)
+#   always_run    : true = always runs (built-ins gate on their own conditions)
+validators:
+  file-exists:
+    description: "Verify every output file declared on the task exists in the repo"
+    builtin: file_exists
+    always_run: true
+    match_extensions: []
+    match_paths: []
+
+  ruff:
+    description: "Python linter (ruff check .)"
+    command: "ruff check ."
+    match_extensions: [".py"]
+    match_paths: []
+
+  pytest:
+    description: "Python test runner (pytest --tb=short -q)"
+    command: "pytest --tb=short -q"
+    match_extensions: [".py"]
+    match_paths: ["tests/", "test_"]
+
+  mypy:
+    description: "Python static type checker (mypy .)"
+    command: "mypy ."
+    match_extensions: [".py"]
+    auto_detect: false
+
+  eslint:
+    description: "JavaScript/TypeScript linter (npx eslint .)"
+    command: "npx eslint ."
+    match_extensions: [".js", ".ts", ".tsx", ".jsx"]
+    match_paths: []
+
+  jest:
+    description: "JavaScript/TypeScript test runner (npx jest)"
+    command: "npx jest --passWithNoTests"
+    match_extensions: [".test.js", ".spec.js", ".test.ts", ".spec.ts", ".test.tsx"]
+    match_paths: []
+
+  llm-acceptance:
+    description: "LLM evaluates each task acceptance criterion against agent outputs"
+    builtin: llm_acceptance
+    always_run: true
+    match_extensions: []
+    match_paths: []

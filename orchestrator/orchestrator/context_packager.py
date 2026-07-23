@@ -291,6 +291,7 @@ def build_context_package(
             "inputs": task.inputs,
             "outputs": task.outputs,
             "acceptance": task.acceptance,
+            "validators": task.validators,
             "risk_tier": task.risk_tier,
             "budget": task.budget,
         },
@@ -408,7 +409,9 @@ def create_run(
     checkpoint = package.get("checkpoint") or {}
     if checkpoint.get("type") == "suspension" and checkpoint.get("suspended_branch"):
         branch = checkpoint["suspended_branch"]
-    elif checkpoint.get("type") == "awaiting_human" and checkpoint.get("human_response") is not None:
+    elif (
+        checkpoint.get("type") == "awaiting_human" and checkpoint.get("human_response") is not None
+    ):
         # Human-input resumes reuse the original branch (partial commits already there).
         branch = checkpoint.get("paused_branch") or f"agent/{agent_type}/{task_id}"
     elif package.get("is_resumption"):

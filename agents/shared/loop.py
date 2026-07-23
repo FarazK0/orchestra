@@ -278,9 +278,7 @@ def _run_heartbeat(
             pass  # best-effort
 
 
-def _start_heartbeat(
-    gw_url: str, task_id: str, agent_id: str, auth_hdrs: dict
-) -> threading.Event:
+def _start_heartbeat(gw_url: str, task_id: str, agent_id: str, auth_hdrs: dict) -> threading.Event:
     stop = threading.Event()
     threading.Thread(
         target=_run_heartbeat,
@@ -410,6 +408,38 @@ def _format_resumption_section(pkg: dict) -> list[str]:
     return lines
 
 
+def _validation_checklist_lines(task: dict) -> list[str]:
+    """Return lines describing which checks will run at validation time."""
+    validators: list[str] = task.get("validators") or []
+    has_acceptance = bool(task.get("acceptance"))
+
+    if not validators and not has_acceptance:
+        return []
+
+    _VALIDATOR_RULES: dict[str, str] = {
+        "ruff": "ruff: `ruff check .` must pass with zero errors on all Python files",
+        "pytest": "pytest: all tests must pass (`pytest --tb=short -q`)",
+        "eslint": "eslint: `npx eslint .` must pass with zero errors",
+        "jest": "jest: all tests must pass (`npx jest`)",
+        "mypy": "mypy: `mypy .` must pass with zero type errors",
+    }
+
+    lines = [
+        "### Validation checklist",
+        "These checks run automatically after `task_complete`. Pre-empt them to avoid a retry:",
+        "- file-exists: every output file listed above must exist on disk when you finish",
+    ]
+    for v in validators:
+        lines.append(f"- {_VALIDATOR_RULES.get(v, f'{v}: will be run at validation time')}")
+    if has_acceptance:
+        lines.append(
+            "- llm-acceptance: an LLM will evaluate your output against each acceptance criterion — "
+            "make sure every criterion is demonstrably satisfied"
+        )
+    lines.append("")
+    return lines
+
+
 def format_context_package(pkg: dict) -> str:
     """Render a context package dict as the agent's opening user message."""
     task = pkg["task"]
@@ -420,6 +450,7 @@ def format_context_package(pkg: dict) -> str:
         "### Acceptance Criteria",
         *[f"- {c}" for c in task["acceptance"]],
         "",
+        *_validation_checklist_lines(task),
         "### Input Files",
     ]
 

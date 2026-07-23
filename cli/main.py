@@ -20,6 +20,17 @@ from typing import Optional
 
 import httpx
 import typer
+from dotenv import load_dotenv
+
+load_dotenv()
+
+try:
+    from agents.shared.llm import LLMClient as _LLMClient
+
+    _HAS_LLM = True
+except Exception:
+    _HAS_LLM = False
+    _LLMClient = None  # type: ignore[assignment]
 
 app = typer.Typer(
     name="orchctl",
@@ -46,6 +57,140 @@ def _handle_error(resp: httpx.Response) -> None:
             detail = resp.text
         typer.echo(f"Error {resp.status_code}: {detail}", err=True)
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Validator helpers (used by create-task and the validator subcommand)
+# ---------------------------------------------------------------------------
+
+
+def _fetch_registry() -> list[dict]:
+    """Return the validator registry from the orchestrator, or [] on failure."""
+    try:
+        with _client() as c:
+            resp = c.get("/validators")
+        if resp.is_error:
+            return []
+        return resp.json().get("validators", [])
+    except Exception:
+        return []
+
+
+def _select_validators(outputs: list[str]) -> list[str]:
+    """Interactively select validators for a task based on its outputs.
+
+    Fetches the registry, auto-detects candidates, presents them to the user,
+    and lets the user accept, edit (add/remove), or skip the selection.
+    Returns the final list of validator names to store on the task.
+    """
+    registry = _fetch_registry()
+    if not registry:
+        return []
+
+    # Separate always-on built-ins (shown for info, not stored in task.validators)
+    always_on = [v for v in registry if v.get("always_run")]
+    auto_detectable = [v for v in registry if not v.get("always_run") and v.get("auto_detect", True)]
+
+    # Auto-detect from output paths
+    suggested: list[str] = []
+    for v in auto_detectable:
+        exts = v.get("match_extensions", [])
+        paths_kw = v.get("match_paths", [])
+        for out in outputs:
+            out_lower = out.lower()
+            if any(out_lower.endswith(e) for e in exts) or any(p in out_lower for p in paths_kw):
+                suggested.append(v["name"])
+                break
+
+    # Display what will run
+    typer.echo("\n  Validators for this task:\n")
+    for v in always_on:
+        typer.echo(f"    {_d('~')} {v['name']:<18} {_d(v.get('description',''))}  {_d('(always-on)')}")
+    if suggested:
+        for name in suggested:
+            info = next((v for v in registry if v["name"] == name), {})
+            typer.echo(f"    {_g('✓')} {name:<18} {info.get('description','')}")
+    else:
+        typer.echo(f"    {_d('(no validators auto-detected from outputs)')}")
+
+    opt_in = [v for v in auto_detectable if v["name"] not in suggested]
+    if opt_in:
+        typer.echo(f"\n  {_d('Available (not auto-detected):')}")
+        for v in opt_in:
+            typer.echo(f"    {_d('-')} {v['name']:<18} {_d(v.get('description',''))}")
+
+    typer.echo("")
+    choice = typer.prompt(
+        "  Accept validators? [Y/n/edit]",
+        default="Y",
+    ).strip().lower()
+
+    if choice in ("", "y", "yes"):
+        return suggested
+
+    if choice in ("n", "no"):
+        typer.echo("  No validators assigned — only always-on checks will run.")
+        return []
+
+    # Edit mode: +name to add, -name to remove
+    selected = list(suggested)
+    all_names = {v["name"] for v in registry if not v.get("always_run")}
+    typer.echo(
+        f"\n  Edit mode — type +<name> to add, -<name> to remove, 'done' to finish."
+        f"\n  Current: {', '.join(selected) or '(none)'}"
+        f"\n  Available: {', '.join(sorted(all_names))}"
+    )
+    while True:
+        cmd = typer.prompt("  >").strip()
+        if cmd.lower() in ("done", "ok", ""):
+            break
+        if cmd.startswith("+"):
+            name = cmd[1:].strip()
+            if name in all_names and name not in selected:
+                selected.append(name)
+                typer.echo(f"  Added {name}. Current: {', '.join(selected)}")
+            elif name not in all_names:
+                typer.echo(f"  Unknown validator {name!r}. Available: {', '.join(sorted(all_names))}")
+            else:
+                typer.echo(f"  {name} already in list.")
+        elif cmd.startswith("-"):
+            name = cmd[1:].strip()
+            if name in selected:
+                selected.remove(name)
+                typer.echo(f"  Removed {name}. Current: {', '.join(selected) or '(none)'}")
+            else:
+                typer.echo(f"  {name} not in current list.")
+        else:
+            typer.echo("  Use +<name> or -<name>.")
+
+    return selected
+
+
+# ---------------------------------------------------------------------------
+# validator — subcommand group
+# ---------------------------------------------------------------------------
+
+_validator_app = typer.Typer(help="Manage and list validators.")
+app.add_typer(_validator_app, name="validator")
+
+
+@_validator_app.command("list")
+def validator_list() -> None:
+    """List available validators from the registry."""
+    registry = _fetch_registry()
+    if not registry:
+        typer.echo("No validators found (is the orchestrator running?)")
+        return
+
+    name_w = max(len(v["name"]) for v in registry)
+    typer.echo(f"\n  {'NAME':<{name_w}}  {'AUTO':<5}  DESCRIPTION")
+    typer.echo(f"  {'-' * name_w}  -----  -----------")
+    for v in registry:
+        always = v.get("always_run", False)
+        auto = "yes" if (always or v.get("auto_detect", True)) else "opt"
+        badge = " (always-on)" if always else ""
+        typer.echo(f"  {v['name']:<{name_w}}  {auto:<5}  {v.get('description','')}{badge}")
+    typer.echo("")
 
 
 # ---------------------------------------------------------------------------
@@ -80,14 +225,18 @@ def create_task(
     retries: int = typer.Option(2, help="Retry budget."),
 ) -> None:
     """Create a new task and print its ID."""
+    outputs_list = output or []
+    chosen_validators = _select_validators(outputs_list)
+
     payload = {
         "title": title,
         "owner": owner,
         "risk_tier": risk_tier,
         "acceptance": accept or [],
         "inputs": input or [],
-        "outputs": output or [],
+        "outputs": outputs_list,
         "depends_on": depends_on or [],
+        "validators": chosen_validators,
         "budget": {
             "tokens": tokens,
             "wall_clock_min": wall_clock_min,
@@ -395,10 +544,57 @@ def validate(
     v = body.get("validation", {})
     typer.echo(f"Validated {task_id}: status is now {task['status']!r}")
     if v:
-        ruff_rc = (v.get("ruff") or {}).get("returncode")
-        pytest_rc = (v.get("pytest") or {}).get("returncode")
-        typer.echo(f"  ruff   returncode={ruff_rc}")
-        typer.echo(f"  pytest returncode={pytest_rc}")
+        _show_validation(v)
+
+
+# ---------------------------------------------------------------------------
+# show — full task detail + validation summary
+# ---------------------------------------------------------------------------
+
+
+@app.command("show")
+def show_task(
+    task_id: str = typer.Argument(..., help="Task ID, e.g. TASK-001."),
+) -> None:
+    """Show full detail for a task, including its most recent validation result."""
+    with _client() as c:
+        resp = c.get(f"/tasks/{task_id}")
+    _handle_error(resp)
+    task = resp.json()
+
+    typer.echo(f"\n  {_b(task['id'])}  {_d(task['owner'])}  [{task['status']}]")
+    typer.echo(f"  {task['title']}\n")
+
+    if task.get("inputs"):
+        typer.echo(f"  {_d('Inputs:')}   {', '.join(task['inputs'])}")
+    if task.get("outputs"):
+        typer.echo(f"  {_d('Outputs:')}  {', '.join(task['outputs'])}")
+    if task.get("validators"):
+        typer.echo(f"  {_d('Validators:')} {', '.join(task['validators'])}")
+    if task.get("acceptance"):
+        typer.echo(f"  {_d('Acceptance criteria:')}")
+        for criterion in task["acceptance"]:
+            typer.echo(f"    {_d('•')} {criterion}")
+
+    risk_tier = task.get("risk_tier", 1)
+    if risk_tier == 2:
+        typer.echo(f"\n  {_r('[TIER 2 — BLOCKING APPROVAL]')}")
+
+    # Fetch validation result
+    with _client() as c:
+        v_resp = c.get(f"/tasks/{task_id}/validation")
+    if v_resp.is_error:
+        typer.echo(f"\n  {_d('(validation data unavailable)')}")
+    else:
+        vdata = v_resp.json()
+        if vdata.get("validation") is None:
+            typer.echo(f"\n  {_d('No validation recorded yet.')}")
+        else:
+            validated_at = vdata.get("validated_at", "")
+            if validated_at:
+                typer.echo(f"\n  {_d('Validated at:')} {validated_at[:19].replace('T', ' ')} UTC")
+            _show_validation(vdata["validation"])
+    typer.echo("")
 
 
 # ---------------------------------------------------------------------------
@@ -490,37 +686,42 @@ def _d(s: str) -> str:
 
 
 def _show_validation(v: dict) -> None:
-    ruff = v.get("ruff") or {}
-    pytest_ = v.get("pytest") or {}
+    checks: list[dict] = v.get("checks", [])
+    summary = v.get("summary", "")
+    passed = v.get("passed", False)
 
-    ruff_ok = ruff.get("returncode") == 0
-    pytest_rc = pytest_.get("returncode")
-    pytest_ok = pytest_rc in (0, 5) if pytest_rc is not None else v.get("passed", False)
+    if not checks:
+        # Legacy format fallback (pre-registry validator)
+        ruff = v.get("ruff") or {}
+        pytest_ = v.get("pytest") or {}
+        ruff_ok = ruff.get("returncode") == 0
+        pytest_rc = pytest_.get("returncode")
+        pytest_ok = pytest_rc in (0, 5) if pytest_rc is not None else passed
+        typer.echo(f"  ruff   {_g('PASS') if ruff_ok else _r('FAIL')}")
+        typer.echo(f"  pytest {_g('PASS') if pytest_ok else _r('FAIL')}")
+        return
 
-    typer.echo(f"  ruff   {_g('PASS') if ruff_ok else _r('FAIL')}")
-    if not ruff_ok and ruff.get("stdout"):
-        for line in ruff["stdout"].splitlines()[:8]:
-            typer.echo(f"         {line}")
+    verdict = _g("PASSED") if passed else _r("FAILED")
+    typer.echo(f"\n  Validation: {verdict}  ({summary})\n")
 
-    typer.echo(f"  pytest {_g('PASS') if pytest_ok else _r('FAIL')}")
-    if pytest_.get("stdout"):
-        lines = pytest_["stdout"].splitlines()
-        # Always show the summary line
-        for line in reversed(lines):
-            stripped = line.strip()
-            if stripped and any(k in stripped for k in ("passed", "failed", "error", "no tests")):
-                typer.echo(f"         {stripped}")
-                break
-        # On failure, show the short failure details too
-        if not pytest_ok:
-            in_fail = False
-            for line in lines:
-                if line.startswith("FAILED") or line.startswith("ERROR"):
-                    in_fail = True
-                if in_fail:
-                    typer.echo(f"         {_r(line)}")
-                if in_fail and not line.strip():
-                    break
+    # Per-check table
+    name_w = max((len(c["name"]) for c in checks), default=10)
+    out_w = 52
+    for chk in checks:
+        icon = _g("✓") if chk["passed"] else _r("✗")
+        name_col = chk["name"].ljust(name_w)
+        first_line = (chk.get("output") or "").splitlines()[0][:out_w]
+        dur = f"({chk.get('duration_s', 0):.1f}s)"
+        typer.echo(f"    {icon} {name_col}  {first_line:<{out_w}}  {_d(dur)}")
+
+    # Failure details: show full output for failed checks
+    failed_checks = [c for c in checks if not c["passed"]]
+    if failed_checks:
+        typer.echo("")
+        for chk in failed_checks:
+            typer.echo(f"  {_r('✗')} {chk['name']} output:")
+            for line in (chk.get("output") or "").splitlines()[:20]:
+                typer.echo(f"    {line}")
 
 
 def _cancel_task(task_id: str, reason: str = "human cancelled") -> bool:
@@ -804,7 +1005,7 @@ def questions() -> None:
         if cp.get("current_progress"):
             typer.echo(f"  Progress: {_d(cp['current_progress'])}")
     n = len(tasks)
-    typer.echo(f"\n  {n} task(s) awaiting input.  Run: orchctl respond TASK-ID \"answer\"")
+    typer.echo(f'\n  {n} task(s) awaiting input.  Run: orchctl respond TASK-ID "answer"')
 
 
 @app.command("respond")
@@ -846,7 +1047,7 @@ def review(
 
     \b
     Polls the orchestrator for tasks in 'completed' or 'validated' state.
-    For each completed task: runs validation (ruff + pytest) automatically.
+    For each completed task: runs all assigned validators automatically.
     Then prompts for human approval (merge to main) or skip.
     Exits when all tasks are closed/failed/escalated, or on Ctrl+C.
     """
@@ -1215,6 +1416,550 @@ def memory_delete(
         )
     _handle_error(resp)
     typer.echo(f"  Deleted memory {match['id'][:8]} ({match['key']})")
+
+
+# ---------------------------------------------------------------------------
+# Agent identity commands
+# ---------------------------------------------------------------------------
+
+_HUMAN_TAUGHT_PREFIXES = ("skill/human/", "skill/session/")
+
+
+def _get_llm_backend() -> str:
+    """Return the active LLM backend: 'claude' (default) or 'python'."""
+    val = os.getenv("ORCHESTRA_LLM_BACKEND", "").lower()
+    if val in {"claude", "python"}:
+        return val
+    cfg = Path.home() / ".config" / "orchestra" / "config"
+    if cfg.exists():
+        for line in cfg.read_text().splitlines():
+            if line.startswith("llm_backend="):
+                val = line.split("=", 1)[1].strip().lower()
+                if val in {"claude", "python"}:
+                    return val
+    return "claude"
+
+
+# ---------------------------------------------------------------------------
+# config sub-app
+# ---------------------------------------------------------------------------
+
+_config_app = typer.Typer(help="Manage orchctl session configuration.")
+app.add_typer(_config_app, name="config")
+
+_CFG_PATH = Path.home() / ".config" / "orchestra" / "config"
+_VALID_BACKENDS = {"claude", "python"}
+
+
+@_config_app.command("show")
+def config_show() -> None:
+    """Show current orchctl configuration and backend availability."""
+    import shutil
+
+    # Determine backend and source
+    env_val = os.getenv("ORCHESTRA_LLM_BACKEND", "").lower()
+    if env_val in _VALID_BACKENDS:
+        backend, source = env_val, "ORCHESTRA_LLM_BACKEND env var"
+    else:
+        file_val = ""
+        if _CFG_PATH.exists():
+            for line in _CFG_PATH.read_text().splitlines():
+                if line.startswith("llm_backend="):
+                    file_val = line.split("=", 1)[1].strip().lower()
+        if file_val in _VALID_BACKENDS:
+            backend, source = file_val, "~/.config/orchestra/config"
+        else:
+            backend, source = "claude", "default"
+
+    typer.echo(f"\n  llm_backend = {_b(backend)}  ({source})\n")
+    # Claude availability
+    claude_ok = bool(shutil.which("claude"))
+    typer.echo(
+        f"  claude CLI   : {'available' if claude_ok else _r('not found — run: claude login')}"
+    )
+    # Python LLMClient availability
+    api_key_set = bool(os.getenv("ANTHROPIC_API_KEY"))
+    typer.echo(
+        f"  python LLM   : {'ANTHROPIC_API_KEY set' if api_key_set else _r('ANTHROPIC_API_KEY not set')}"
+    )
+    typer.echo()
+
+
+@_config_app.command("set")
+def config_set(
+    key: str = typer.Argument(..., help="Config key, e.g. llm-backend"),
+    value: str = typer.Argument(..., help="Value, e.g. claude or python"),
+) -> None:
+    """Set a configuration value (saved to ~/.config/orchestra/config)."""
+    key = key.lower().replace("-", "_")
+    value = value.lower()
+
+    if key == "llm_backend":
+        if value not in _VALID_BACKENDS:
+            typer.echo(f"Error: invalid backend {value!r} — choose 'claude' or 'python'.", err=True)
+            raise typer.Exit(1)
+    else:
+        typer.echo(f"Error: unknown config key {key!r}.", err=True)
+        raise typer.Exit(1)
+
+    _CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Read existing lines, update or append
+    lines: list[str] = []
+    if _CFG_PATH.exists():
+        lines = _CFG_PATH.read_text().splitlines()
+    prefix = f"{key}="
+    updated = False
+    for i, line in enumerate(lines):
+        if line.startswith(prefix):
+            lines[i] = f"{prefix}{value}"
+            updated = True
+            break
+    if not updated:
+        lines.append(f"{prefix}{value}")
+    _CFG_PATH.write_text("\n".join(lines) + "\n")
+    typer.echo(f"  Set {key} = {_b(value)}  (saved to ~/.config/orchestra/config)")
+
+
+def _is_human_taught(key: str) -> bool:
+    return any(key.startswith(p) for p in _HUMAN_TAUGHT_PREFIXES)
+
+
+def _build_session_prompt(agent_id: str, memories: list[dict]) -> str:
+    """Assemble a system prompt for orchctl ask / orchctl session (LLMClient path)."""
+    identity = next((m for m in memories if m["memory_type"] == "identity"), None)
+    episodes = [m for m in memories if m["memory_type"] == "episode"]
+    skills = [m for m in memories if m["memory_type"] == "skill"]
+
+    identity_text = identity["content"] if identity else "(no identity memory yet)"
+    recent_eps = episodes[-3:]
+    ep_text = "\n\n".join(m["content"][:200] for m in recent_eps) or "(none)"
+    skill_text = "\n\n".join(m["content"] for m in skills)[:1200] or "(none)"
+
+    return (
+        f"You are {agent_id} — an AI agent for this software project.\n\n"
+        "## IDENTITY SESSION MODE\n"
+        "You are NOT executing a task. There is no branch to commit to, no deliverables, "
+        "no gateway calls needed.\n"
+        "This session is for identity work: reflecting on your expertise, accepting new "
+        "skills from the operator, and exploring your knowledge. "
+        "Respond naturally and conversationally.\n\n"
+        f"{identity_text}\n\n"
+        "## Task history\n"
+        f"{len(episodes)} tasks completed.\n"
+        f"Recent episodes:\n{ep_text}\n\n"
+        "## Skills\n"
+        f"{skill_text}"
+    )
+
+
+def _build_cli_session_prompt(agent_id: str, memories: list[dict]) -> str:
+    """System prompt for the claude CLI subprocess path.
+
+    Extends the base prompt with curl instructions so the agent can write
+    skills and search memories via the orchestrator REST API (no capability
+    token required — POST /agent-memories is platform-open).
+    """
+    base = _build_session_prompt(agent_id, memories)
+    orch_url = _URL  # same base URL used by _client()
+    return (
+        base + f"\n\n## Recording a skill during this session\n"
+        "When you learn something worth keeping, run this curl command:\n"
+        f"  curl -s -X POST {orch_url}/agent-memories \\\n"
+        "    -H 'Content-Type: application/json' \\\n"
+        f'    -d \'{{"agent_id": "{agent_id}", "memory_type": "skill", '
+        '"key": "skill/session/<topic>", '
+        '"content": "<what to remember>", "actor": "session"}}\'\n\n'
+        "## Searching your memories\n"
+        f"  curl -s '{orch_url}/agent-memories?agent_id={agent_id}'"
+    )
+
+
+def _claude_ask(agent_id: str, question: str, system: str) -> None:
+    """Run a one-shot ask via the `claude` CLI subprocess."""
+    import shutil
+    import subprocess
+
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        typer.echo("Error: 'claude' CLI not found. Run 'claude login' first.", err=True)
+        raise typer.Exit(1)
+
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    result = subprocess.run(
+        ["claude", "--system-prompt", system, "-p", question],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    output = result.stdout.strip() or result.stderr.strip()
+    typer.echo(f"\n{output}\n")
+
+
+def _claude_session(agent_id: str, system: str) -> None:
+    """Run an interactive identity session via the `claude` CLI subprocess."""
+    import shutil
+    import subprocess
+
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        typer.echo("Error: 'claude' CLI not found. Run 'claude login' first.", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(
+        f"\n  {_b('[identity session: ' + agent_id + ']')}  "
+        "Launching claude CLI — type 'exit' inside to end.\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    subprocess.run(["claude", "--system-prompt", system], env=env)
+
+
+_SESSION_TOOLS = [
+    {
+        "name": "write_skill",
+        "description": "Record a new skill or fact to retain for future tasks.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Short topic slug, e.g. 'db-pattern'."},
+                "content": {"type": "string", "description": "The skill or fact to remember."},
+            },
+            "required": ["topic", "content"],
+        },
+    },
+    {
+        "name": "search_memory",
+        "description": "Search memory archive by keyword.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "Search keywords."}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "end_session",
+        "description": "End this identity session.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+]
+
+
+def _llm_ask(agent_id: str, question: str, system: str, model: str) -> None:
+    """One-shot ask via LLMClient (Python backend)."""
+    if not _HAS_LLM:
+        typer.echo("Error: LLM client not available (missing agents/shared package).", err=True)
+        raise typer.Exit(1)
+    llm = _LLMClient(model=model)
+    try:
+        response = llm.call(
+            messages=[{"role": "user", "content": question}], system=system, max_tokens=1024
+        )
+    except Exception as exc:
+        typer.echo(f"Error calling LLM: {exc}", err=True)
+        raise typer.Exit(1)
+    for block in response.content:
+        if hasattr(block, "text"):
+            typer.echo(f"\n{block.text}\n")
+
+
+def _llm_session(agent_id: str, memories: list[dict], system: str, model: str) -> None:
+    """Multi-turn identity session via LLMClient (Python backend)."""
+    if not _HAS_LLM:
+        typer.echo("Error: LLM client not available (missing agents/shared package).", err=True)
+        raise typer.Exit(1)
+    llm = _LLMClient(model=model)
+    messages: list[dict] = []
+    typer.echo(f"\n  {_b('[identity session: ' + agent_id + ']')}  Type 'exit' or Ctrl+D to end.\n")
+    while True:
+        try:
+            user_input = typer.prompt(f"  {_b('You')}").strip()
+        except (typer.Abort, EOFError, KeyboardInterrupt):
+            typer.echo("\n  Session ended.")
+            break
+        if user_input.lower() in {"exit", "quit", "bye"}:
+            typer.echo("  Session ended.")
+            break
+        messages.append({"role": "user", "content": user_input})
+        try:
+            response = llm.call(
+                messages=messages, system=system, tools=_SESSION_TOOLS, max_tokens=2048
+            )
+        except Exception as exc:
+            typer.echo(f"  {_r('LLM error:')} {exc}", err=True)
+            break
+        reply_text = ""
+        tool_results = []
+        for block in response.content:
+            if hasattr(block, "text"):
+                reply_text += block.text
+            elif block.type == "tool_use":
+                name, inp = block.name, block.input
+                if name == "end_session":
+                    if reply_text:
+                        typer.echo(f"\n  {_b(agent_id + ':')} {reply_text}")
+                    typer.echo("  Session ended.")
+                    return
+                elif name == "write_skill":
+                    topic = inp.get("topic", "general")
+                    content = inp.get("content", "")
+                    with _client() as c:
+                        r = c.post(
+                            "/agent-memories",
+                            json={
+                                "agent_id": agent_id,
+                                "memory_type": "skill",
+                                "key": f"skill/session/{topic}",
+                                "content": content,
+                                "actor": "session",
+                            },
+                        )
+                    tool_out = f"Skill recorded: {topic}" if not r.is_error else f"Error: {r.text}"
+                    tool_results.append(
+                        {"type": "tool_result", "tool_use_id": block.id, "content": tool_out}
+                    )
+                elif name == "search_memory":
+                    query = inp.get("query", "").lower()
+                    hits = [m for m in memories if query in m.get("content", "").lower()][:5]
+                    tool_out = (
+                        "\n".join(
+                            f"[{h['memory_type']}] {h['key']}: {h['content'][:150]}" for h in hits
+                        )
+                        if hits
+                        else "No memories found."
+                    )
+                    tool_results.append(
+                        {"type": "tool_result", "tool_use_id": block.id, "content": tool_out}
+                    )
+        if reply_text:
+            typer.echo(f"\n  {_b(agent_id + ':')} {reply_text}\n")
+        messages.append({"role": "assistant", "content": response.content})
+        if tool_results:
+            messages.append({"role": "user", "content": tool_results})
+            try:
+                follow = llm.call(
+                    messages=messages, system=system, tools=_SESSION_TOOLS, max_tokens=2048
+                )
+                follow_text = "".join(b.text for b in follow.content if hasattr(b, "text"))
+                if follow_text:
+                    typer.echo(f"  {_b(agent_id + ':')} {follow_text}\n")
+                messages.append({"role": "assistant", "content": follow.content})
+            except Exception as exc:
+                typer.echo(f"  {_r('LLM error:')} {exc}", err=True)
+
+
+@app.command("identities")
+def identities(
+    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Filter by agent ID."),
+) -> None:
+    """List agent identity profiles with task history and skill breakdown."""
+    params: dict = {"project_id": "default"}
+    if agent:
+        params["agent_id"] = agent
+
+    with _client() as c:
+        all_rows = c.get("/agent-memories", params=params).json()
+
+    by_type: dict[str, list] = {"identity": [], "episode": [], "skill": [], "convention": []}
+    for m in all_rows if isinstance(all_rows, list) else []:
+        t = m.get("memory_type", "")
+        if t in by_type:
+            by_type[t].append(m)
+
+    agent_ids: list[str] = []
+    seen: set[str] = set()
+    for m in by_type["identity"]:
+        if m["agent_id"] not in seen:
+            seen.add(m["agent_id"])
+            agent_ids.append(m["agent_id"])
+    # Also include agents with episodes/skills but no identity yet
+    for lst in (by_type["episode"], by_type["skill"]):
+        for m in lst:
+            if m["agent_id"] not in seen:
+                seen.add(m["agent_id"])
+                agent_ids.append(m["agent_id"])
+
+    if not agent_ids:
+        typer.echo("  No agent profiles found.")
+        return
+
+    for aid in sorted(agent_ids):
+        identity_row = next((m for m in by_type["identity"] if m["agent_id"] == aid), None)
+        episodes = [m for m in by_type["episode"] if m["agent_id"] == aid]
+        skills = [m for m in by_type["skill"] if m["agent_id"] == aid]
+
+        typer.echo(f"\n  {_b(aid)}")
+        if identity_row:
+            updated = identity_row.get("updated_at", "")[:19]
+            typer.echo(f"  Last updated: {_d(updated)}")
+            content = identity_row["content"]
+            # Extract role line
+            if "## Role" in content:
+                role_body = content.split("## Role", 1)[1].strip()
+                role_line = next((ln.strip() for ln in role_body.splitlines() if ln.strip()), "")
+                typer.echo(f"  Role: {_d(role_line[:100])}")
+            # Extract domain expertise
+            if "## Domain expertise" in content:
+                exp_body = content.split("## Domain expertise", 1)[1]
+                next_sec = exp_body.find("\n## ")
+                exp_body = exp_body[:next_sec].strip() if next_sec != -1 else exp_body.strip()
+                if exp_body and exp_body != "(none yet — updated as tasks complete)":
+                    tags = [
+                        ln[2:].split(" (")[0].strip()
+                        for ln in exp_body.splitlines()
+                        if ln.startswith("- ")
+                    ]
+                    typer.echo(f"  Domain: {_d(', '.join(tags))}")
+        else:
+            typer.echo(f"  {_d('(no identity memory)')}")
+
+        typer.echo(f"  Tasks completed: {len(episodes)}")
+
+        auto_skills = [s for s in skills if not _is_human_taught(s["key"])]
+        human_skills = [s for s in skills if _is_human_taught(s["key"])]
+        typer.echo(f"  Skills: {len(auto_skills)} auto, {len(human_skills)} human-taught")
+
+        if human_skills:
+            for s in human_skills:
+                topic = s["key"].split("/")[-1]
+                snippet = s["content"][:60].replace("\n", " ")
+                typer.echo(
+                    f"    {_b('[human-taught]')} {topic:<20} {_d(snippet)}  "
+                    f"{_d('[id: ' + s['id'][:8] + ']')}"
+                )
+
+
+@app.command("teach")
+def teach(
+    agent_id: str = typer.Argument(..., help="Agent ID, e.g. claude-code-agent."),
+    fact: str = typer.Argument(..., help="Skill or fact to record."),
+    topic: str = typer.Option(
+        "general", "--topic", "-t", help="Short topic slug (e.g. db-pattern)."
+    ),
+) -> None:
+    """Inject a skill or fact directly into an agent's memory.
+
+    \b
+    Use 'orchctl forget AGENT-ID TOPIC' to remove it later.
+    Re-teaching the same topic overwrites the previous content.
+    """
+    key = f"skill/human/{topic}"
+    with _client() as c:
+        resp = c.post(
+            "/agent-memories",
+            json={
+                "agent_id": agent_id,
+                "memory_type": "skill",
+                "key": key,
+                "content": fact,
+                "actor": "human",
+            },
+        )
+    _handle_error(resp)
+    typer.echo(
+        f"  Wrote [human-taught skill] to {agent_id}: topic={topic}\n"
+        f"  Remove with: orchctl forget {agent_id} {topic}"
+    )
+
+
+@app.command("forget")
+def forget(
+    agent_id: str = typer.Argument(..., help="Agent ID, e.g. claude-code-agent."),
+    topic_or_id: str = typer.Argument(..., help="Topic slug or 8-char memory ID."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
+) -> None:
+    """Remove a human-taught skill from an agent's memory.
+
+    \b
+    Matches by topic slug (last segment of key) or 8-char memory ID prefix.
+    Only removes entries written via 'orchctl teach' or an identity session.
+    """
+    with _client() as c:
+        resp = c.get("/agent-memories", params={"agent_id": agent_id, "memory_type": "skill"})
+    _handle_error(resp)
+    skills = resp.json()
+    human = [s for s in skills if _is_human_taught(s["key"])]
+
+    match = next(
+        (
+            s
+            for s in human
+            if s["id"].startswith(topic_or_id) or s["key"].split("/")[-1] == topic_or_id
+        ),
+        None,
+    )
+    if match is None:
+        typer.echo(
+            f"  No human-taught skill matching {topic_or_id!r} found for {agent_id}.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    if not yes:
+        typer.echo(f"\n  Will delete: {match['key']}  ({match['content'][:60]})")
+        typer.confirm("  Confirm deletion?", abort=True)
+
+    with _client() as c:
+        resp = c.request(
+            "DELETE",
+            f"/agent-memories/{match['id']}",
+            json={"reason": "human removed via orchctl forget"},
+        )
+    _handle_error(resp)
+    typer.echo(f"  Removed skill {match['key']!r} from {agent_id}.")
+
+
+@app.command("ask")
+def ask(
+    agent_id: str = typer.Argument(
+        ..., help="Agent ID whose identity to probe, e.g. backend-agent."
+    ),
+    question: str = typer.Argument(..., help="Question to ask."),
+    model: str = typer.Option(
+        "claude-haiku-4-5-20251001", "--model", "-m", help="Model to use (python backend only)."
+    ),
+) -> None:
+    """One-shot competency probe — ask a question grounded in an agent's identity memory.
+
+    \b
+    Backend is set with 'orchctl config set llm-backend <claude|python>'.
+    claude (default): uses the claude CLI subprocess (needs 'claude login').
+    python: uses LLMClient directly (needs ANTHROPIC_API_KEY).
+    """
+    with _client() as c:
+        resp = c.get("/agent-memories", params={"agent_id": agent_id})
+    _handle_error(resp)
+    memories = resp.json()
+    if _get_llm_backend() == "python":
+        _llm_ask(agent_id, question, _build_session_prompt(agent_id, memories), model)
+    else:
+        _claude_ask(agent_id, question, _build_cli_session_prompt(agent_id, memories))
+
+
+@app.command("session")
+def session_cmd(
+    agent_id: str = typer.Argument(
+        ..., help="Agent ID whose identity to embody, e.g. backend-agent."
+    ),
+    model: str = typer.Option(
+        "claude-sonnet-4-6", "--model", "-m", help="Model to use (python backend only)."
+    ),
+) -> None:
+    """Multi-turn interactive identity session with an agent.
+
+    \b
+    Backend is set with 'orchctl config set llm-backend <claude|python>'.
+    claude (default): uses the claude CLI subprocess (needs 'claude login').
+    python: uses LLMClient directly (needs ANTHROPIC_API_KEY).
+    The agent can search its memory and write new skills during the session.
+    """
+    with _client() as c:
+        resp = c.get("/agent-memories", params={"agent_id": agent_id})
+    _handle_error(resp)
+    memories: list[dict] = resp.json()
+    if _get_llm_backend() == "python":
+        _llm_session(agent_id, memories, _build_session_prompt(agent_id, memories), model)
+    else:
+        _claude_session(agent_id, _build_cli_session_prompt(agent_id, memories))
 
 
 # ---------------------------------------------------------------------------

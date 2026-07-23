@@ -17,6 +17,7 @@
     "outputs": {"type": "array", "items": {"type": "string"},
                 "description": "paths the task is allowed to write; also the conflict-detection key"},
     "acceptance": {"type": "array", "items": {"type": "string"}},
+    "validators": {"type": "array", "items": {"type": "string"}, "default": []},
     "risk_tier": {"type": "integer", "minimum": 0, "maximum": 2},
     "budget": {
       "type": "object",

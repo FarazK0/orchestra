@@ -59,6 +59,7 @@ class Task(BaseModel):
     inputs: list[str] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)
     acceptance: list[str] = Field(default_factory=list)
+    validators: list[str] = Field(default_factory=list)
     risk_tier: Annotated[int, Field(ge=0, le=2)]
     budget: TaskBudget
     # v0.3 adaptive lifecycle

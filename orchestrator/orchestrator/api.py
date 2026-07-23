@@ -146,6 +146,7 @@ class TaskCreate(BaseModel):
     inputs: list[str] = Field(default_factory=list)
     outputs: list[str] = Field(default_factory=list)
     acceptance: list[str] = Field(default_factory=list)
+    validators: list[str] | None = None  # None → auto-detect from outputs; [] → no validators
     risk_tier: Annotated[int | None, Field(ge=0, le=2)] = None
     budget: TaskBudget = Field(
         default_factory=lambda: TaskBudget(tokens=100_000, wall_clock_min=30, retries=2)
@@ -206,6 +207,16 @@ class AgentMemorySchema(BaseModel):
         )
 
 
+class AgentMemoryCreate(BaseModel):
+    agent_id: str
+    project_id: str = "default"
+    memory_type: str
+    key: str
+    content: str
+    source_task_id: str | None = None
+    actor: str = "human"
+
+
 class MemoryDeleteRequest(BaseModel):
     reason: str = "human deleted"
 
@@ -251,6 +262,27 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/validators")
+def list_validators() -> dict:
+    """Return the validator registry from permissions/validators.yaml."""
+    from .validator import load_registry
+
+    registry = load_registry()
+    validators = [
+        {
+            "name": name,
+            "description": cfg.get("description", ""),
+            "auto_detect": cfg.get("auto_detect", True) and not cfg.get("always_run", False),
+            "always_run": cfg.get("always_run", False),
+            "builtin": bool(cfg.get("builtin")),
+            "command": cfg.get("command"),
+            "match_extensions": cfg.get("match_extensions", []),
+        }
+        for name, cfg in registry.items()
+    ]
+    return {"validators": validators}
+
+
 @app.post("/tasks", response_model=TaskSchema, status_code=201)
 def create_task(body: TaskCreate, session: SessionDep) -> TaskSchema:
     now = datetime.now(timezone.utc)
@@ -259,6 +291,16 @@ def create_task(body: TaskCreate, session: SessionDep) -> TaskSchema:
     # cannot lower below it (prevents accidentally downgrading a migration to tier 0).
     policy_tier = get_policy().tier_for_outputs(body.outputs)
     effective_tier = max(body.risk_tier, policy_tier) if body.risk_tier is not None else policy_tier
+
+    # validators=None means "auto-detect from outputs" (planner / root-agent path).
+    # validators=[] means the user explicitly chose no validators.
+    # validators=[...] means the user made an explicit selection.
+    if body.validators is None:
+        from .validator import detect_validators, load_registry
+        effective_validators = detect_validators(body.outputs, load_registry())
+    else:
+        effective_validators = body.validators
+
     task = TaskORM(
         id=_next_task_id(session),
         schema_version=1,
@@ -269,6 +311,7 @@ def create_task(body: TaskCreate, session: SessionDep) -> TaskSchema:
         inputs=body.inputs,
         outputs=body.outputs,
         acceptance=body.acceptance,
+        validators=effective_validators,
         risk_tier=effective_tier,
         budget=body.budget.model_dump(),
         parent_task_id=body.parent_task_id,
@@ -461,6 +504,44 @@ def validate_task_endpoint(
     )
 
 
+@app.get("/tasks/{task_id}/validation")
+def get_task_validation(task_id: str, session: SessionDep) -> dict:
+    """Return the most recent validation result for a task.
+
+    The full check-by-check result is stored in the audit row written atomically
+    with the TASK_VALIDATED / TASK_FAILED event.  Returns null validation when
+    the task has never been validated.
+    """
+    _task_or_404(session, task_id)
+
+    event = session.execute(
+        select(EventORM)
+        .where(
+            EventORM.task_id == task_id,
+            EventORM.event_type.in_(["TASK_VALIDATED", "TASK_FAILED"]),
+        )
+        .order_by(EventORM.emitted_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    if event is None:
+        return {"task_id": task_id, "event_type": None, "validated_at": None, "validation": None}
+
+    audit = session.execute(
+        select(AuditRowORM).where(AuditRowORM.event_id == event.event_id)
+    ).scalar_one_or_none()
+
+    # audit.details holds the full result dict; fall back to event payload if missing
+    validation_data = (audit.details if audit is not None else None) or event.payload
+
+    return {
+        "task_id": task_id,
+        "event_type": event.event_type,
+        "validated_at": event.emitted_at.isoformat(),
+        "validation": validation_data,
+    }
+
+
 @app.get("/tasks/{task_id}/runs")
 def list_task_runs(task_id: str, session: SessionDep) -> list[dict]:
     """Return run records for a task, newest first."""
@@ -533,6 +614,75 @@ def trigger_replan(body: ReplanRequest, bg: BackgroundTasks) -> dict:
     bg.add_task(_try_publish_replan, event_id, payload)
     log.info("Replan queued: trigger=%s child=%s", body.trigger_task_id, body.child_task_id)
     return {"status": "queued", "event_id": event_id}
+
+
+@app.post("/agent-memories", response_model=AgentMemorySchema, status_code=201)
+def create_agent_memory(
+    body: AgentMemoryCreate,
+    session: SessionDep,
+    bg: BackgroundTasks,
+) -> AgentMemorySchema:
+    """Platform-level upsert for agent memories — no active-run check required.
+
+    Used by CLI commands (orchctl teach, orchctl session write_skill) that operate
+    outside of task execution. The (agent_id, project_id, key) unique constraint
+    means re-posting the same key updates the existing row.
+    """
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    mem = session.execute(
+        select(AgentMemoryORM).where(
+            AgentMemoryORM.agent_id == body.agent_id,
+            AgentMemoryORM.project_id == body.project_id,
+            AgentMemoryORM.key == body.key,
+        )
+    ).scalar_one_or_none()
+
+    if mem is None:
+        mem = AgentMemoryORM(
+            id=_uuid.uuid4(),
+            agent_id=body.agent_id,
+            project_id=body.project_id,
+            memory_type=body.memory_type,
+            key=body.key,
+            content=body.content,
+            source_task_id=body.source_task_id,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(mem)
+    else:
+        mem.content = body.content
+        mem.memory_type = body.memory_type
+        mem.source_task_id = body.source_task_id
+        mem.updated_at = now
+
+    event = EventORM(
+        event_id=_uuid.uuid4(),
+        schema_version=1,
+        event_type="AGENT_MEMORY_WRITTEN",
+        task_id=body.source_task_id,
+        emitted_by=body.actor,
+        emitted_at=now,
+        payload={
+            "agent_id": body.agent_id,
+            "memory_type": body.memory_type,
+            "key": body.key,
+            "actor": body.actor,
+        },
+    )
+    session.add(event)
+    session.flush()
+    bg.add_task(
+        _try_publish,
+        str(event.event_id),
+        "AGENT_MEMORY_WRITTEN",
+        body.source_task_id or "",
+        event.payload,
+    )
+    return AgentMemorySchema.from_orm(mem)
 
 
 @app.get("/agent-memories", response_model=list[AgentMemorySchema])

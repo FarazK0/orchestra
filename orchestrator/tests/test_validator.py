@@ -1,4 +1,4 @@
-"""Tests for the validator (ruff + pytest against the agent branch).
+"""Tests for the pluggable registry-driven validator.
 
 Tests create a real temporary git repo rather than mocking subprocess,
 so ruff and pytest must be available (they are: orchestra dev deps).
@@ -14,7 +14,13 @@ from pathlib import Path
 import pytest
 
 from orchestrator.orchestrator.db import Run, Task
-from orchestrator.orchestrator.validator import ValidationError, validate_task
+from orchestrator.orchestrator.validator import (
+    ValidationError,
+    _check_file_exists,
+    detect_validators,
+    load_registry,
+    validate_task,
+)
 
 from .conftest import make_task
 
@@ -37,7 +43,6 @@ def git_repo(tmp_path):
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
 
-    # Add a simple passing file on main
     (repo / "health.py").write_text('def health() -> dict:\n    return {"status": "ok"}\n')
     (repo / "test_health.py").write_text(
         'from health import health\n\n\ndef test_health():\n    assert health() == {"status": "ok"}\n'
@@ -77,13 +82,81 @@ def _make_run(session, task_id: str) -> Run:
 
 
 # ---------------------------------------------------------------------------
-# Tests
+# Registry + detect_validators unit tests (no DB needed)
+# ---------------------------------------------------------------------------
+
+
+class TestRegistry:
+    def test_load_registry_returns_dict(self):
+        registry = load_registry()
+        assert isinstance(registry, dict)
+        assert "ruff" in registry
+        assert "pytest" in registry
+        assert "file-exists" in registry
+        assert "llm-acceptance" in registry
+
+    def test_detect_py_outputs(self):
+        registry = load_registry()
+        result = detect_validators(["app/main.py", "tests/test_app.py"], registry)
+        assert "ruff" in result
+        assert "pytest" in result
+        assert "file-exists" not in result  # always_run, not included in detect list
+        assert "llm-acceptance" not in result  # always_run
+
+    def test_detect_js_outputs(self):
+        registry = load_registry()
+        result = detect_validators(["src/App.tsx", "src/App.test.tsx"], registry)
+        assert "eslint" in result
+
+    def test_detect_empty_outputs(self):
+        registry = load_registry()
+        result = detect_validators([], registry)
+        assert result == []
+
+    def test_detect_no_match(self):
+        registry = load_registry()
+        result = detect_validators(["README.md", "data.csv"], registry)
+        assert result == []
+
+    def test_mypy_excluded_from_autodetect(self):
+        registry = load_registry()
+        result = detect_validators(["app.py"], registry)
+        assert "mypy" not in result  # auto_detect: false
+
+
+# ---------------------------------------------------------------------------
+# Built-in: file-exists unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestFileExists:
+    def test_passes_when_no_outputs(self, tmp_path):
+        result = _check_file_exists(tmp_path, [])
+        assert result.passed is True
+        assert "No output files" in result.output
+
+    def test_passes_when_all_present(self, tmp_path):
+        (tmp_path / "a.py").write_text("x = 1\n")
+        (tmp_path / "b.py").write_text("y = 2\n")
+        result = _check_file_exists(tmp_path, ["a.py", "b.py"])
+        assert result.passed is True
+        assert "All 2" in result.output
+
+    def test_fails_when_file_missing(self, tmp_path):
+        (tmp_path / "a.py").write_text("x = 1\n")
+        result = _check_file_exists(tmp_path, ["a.py", "missing.py"])
+        assert result.passed is False
+        assert "missing.py" in result.output
+
+
+# ---------------------------------------------------------------------------
+# validate_task integration tests
 # ---------------------------------------------------------------------------
 
 
 class TestValidateTask:
     def test_passes_clean_branch(self, session, git_repo):
-        """Agent branch with valid code: ruff passes, pytest passes → validated."""
+        """Agent branch with valid code: all checks pass → validated."""
         task_id = "TASK-V01"
         make_task(session, task_id, status="completed")
         _make_run(session, task_id)
@@ -92,11 +165,29 @@ class TestValidateTask:
         result = validate_task(session, task_id, str(git_repo))
 
         assert result["passed"] is True
-        assert result["ruff"]["returncode"] == 0
-        assert result["pytest"]["returncode"] == 0
+        assert "checks" in result
+        assert result["summary"].endswith("checks passed")
+        # All checks in the list must have passed=True
+        assert all(c["passed"] for c in result["checks"])
 
         task = session.get(Task, task_id)
         assert task.status == "validated"
+
+    def test_result_has_new_shape(self, session, git_repo):
+        """Result dict has the new structured format."""
+        task_id = "TASK-VS"
+        make_task(session, task_id, status="completed")
+        _make_run(session, task_id)
+        _make_agent_branch(git_repo, task_id)
+
+        result = validate_task(session, task_id, str(git_repo))
+
+        assert set(result.keys()) >= {"passed", "branch", "summary", "checks", "checkout_error"}
+        for chk in result["checks"]:
+            assert "name" in chk
+            assert "passed" in chk
+            assert "output" in chk
+            assert "duration_s" in chk
 
     def test_transitions_run_result_on_pass(self, session, git_repo):
         """Run.result is set to 'validated' on success."""
@@ -111,11 +202,12 @@ class TestValidateTask:
         assert run.result == "validated"
 
     def test_fails_ruff(self, session, git_repo):
-        """Branch with an unused import: ruff fails → task transitions to failed."""
+        """Branch with unused import: ruff check fails → task transitions to failed."""
         task_id = "TASK-V03"
-        make_task(session, task_id, status="completed")
+        task = make_task(session, task_id, status="completed")
+        task.validators = ["ruff"]
+        session.flush()
         _make_run(session, task_id)
-        # Write a file that imports something unused (F401)
         _make_agent_branch(
             git_repo,
             task_id,
@@ -125,7 +217,9 @@ class TestValidateTask:
         result = validate_task(session, task_id, str(git_repo))
 
         assert result["passed"] is False
-        assert result["ruff"]["returncode"] != 0
+        ruff_check = next(c for c in result["checks"] if c["name"] == "ruff")
+        assert ruff_check["passed"] is False
+        assert ruff_check["returncode"] != 0
 
         task = session.get(Task, task_id)
         assert task.status == "failed"
@@ -133,7 +227,9 @@ class TestValidateTask:
     def test_fails_pytest(self, session, git_repo):
         """Branch with a failing test: pytest fails → task transitions to failed."""
         task_id = "TASK-V04"
-        make_task(session, task_id, status="completed")
+        task = make_task(session, task_id, status="completed")
+        task.validators = ["pytest"]
+        session.flush()
         _make_run(session, task_id)
         _make_agent_branch(
             git_repo,
@@ -144,7 +240,9 @@ class TestValidateTask:
         result = validate_task(session, task_id, str(git_repo))
 
         assert result["passed"] is False
-        assert result["pytest"]["returncode"] != 0
+        pytest_check = next(c for c in result["checks"] if c["name"] == "pytest")
+        assert pytest_check["passed"] is False
+        assert pytest_check["returncode"] != 0
 
         task = session.get(Task, task_id)
         assert task.status == "failed"
@@ -152,7 +250,9 @@ class TestValidateTask:
     def test_transitions_run_result_on_fail(self, session, git_repo):
         """Run.result is set to 'validation_failed' on failure."""
         task_id = "TASK-V05"
-        make_task(session, task_id, status="completed")
+        task = make_task(session, task_id, status="completed")
+        task.validators = ["pytest"]
+        session.flush()
         run = _make_run(session, task_id)
         _make_agent_branch(
             git_repo,
@@ -173,7 +273,6 @@ class TestValidateTask:
         with pytest.raises(ValidationError, match="must be 'completed'"):
             validate_task(session, task_id, str(git_repo))
 
-        # Task status unchanged
         task = session.get(Task, task_id)
         assert task.status == "running"
 
@@ -188,7 +287,6 @@ class TestValidateTask:
         """If the agent branch doesn't exist, checkout fails → task goes to failed."""
         task_id = "TASK-V07"
         make_task(session, task_id, status="completed")
-        # No agent branch created
 
         result = validate_task(session, task_id, str(git_repo))
 
@@ -201,6 +299,7 @@ class TestValidateTask:
     def test_writes_event_on_pass(self, session, git_repo):
         """A TASK_VALIDATED event is written to the events table."""
         from sqlalchemy import select
+
         from orchestrator.orchestrator.db import Event
 
         task_id = "TASK-V08"
@@ -224,10 +323,13 @@ class TestValidateTask:
     def test_writes_event_on_fail(self, session, git_repo):
         """A TASK_FAILED event is written when validation fails."""
         from sqlalchemy import select
+
         from orchestrator.orchestrator.db import Event
 
         task_id = "TASK-V09"
-        make_task(session, task_id, status="completed")
+        task = make_task(session, task_id, status="completed")
+        task.validators = ["ruff"]
+        session.flush()
         _make_agent_branch(
             git_repo,
             task_id,
@@ -247,6 +349,96 @@ class TestValidateTask:
         )
         assert len(events) == 1
         assert events[0].payload["validation_passed"] is False
+
+    def test_file_exists_fails_when_output_missing(self, session, git_repo):
+        """file-exists check fails when a declared output is absent from the branch."""
+        task_id = "TASK-VFE"
+        task = make_task(session, task_id, status="completed")
+        task.outputs = ["expected_output.py"]
+        task.validators = ["ruff"]
+        session.flush()
+
+        # Branch exists but does NOT write expected_output.py
+        _make_agent_branch(git_repo, task_id)
+        _make_run(session, task_id)
+
+        result = validate_task(session, task_id, str(git_repo))
+
+        assert result["passed"] is False
+        fe_check = next(c for c in result["checks"] if c["name"] == "file-exists")
+        assert fe_check["passed"] is False
+        assert "expected_output.py" in fe_check["output"]
+
+    def test_backward_compat_empty_validators(self, session, git_repo):
+        """Old tasks with validators=[] auto-detect from outputs at validation time."""
+        task_id = "TASK-VBC"
+        task = make_task(session, task_id, status="completed")
+        task.outputs = ["health.py"]
+        # validators intentionally left as [] (old task)
+        task.validators = []
+        session.flush()
+
+        _make_run(session, task_id)
+        _make_agent_branch(git_repo, task_id)
+
+        result = validate_task(session, task_id, str(git_repo))
+
+        # Should have auto-detected ruff and pytest from .py output
+        check_names = [c["name"] for c in result["checks"]]
+        assert "ruff" in check_names
+        assert "pytest" in check_names
+
+    def test_assigned_validators_respected(self, session, git_repo):
+        """task.validators controls which shell validators run."""
+        task_id = "TASK-VAV"
+        task = make_task(session, task_id, status="completed")
+        task.validators = ["ruff"]  # only ruff, not pytest
+        session.flush()
+
+        _make_run(session, task_id)
+        _make_agent_branch(git_repo, task_id)
+
+        result = validate_task(session, task_id, str(git_repo))
+
+        check_names = [c["name"] for c in result["checks"]]
+        assert "ruff" in check_names
+        assert "pytest" not in check_names
+
+    def test_unknown_validator_produces_failed_check(self, session, git_repo):
+        """An unknown validator name yields a failed check with a descriptive message."""
+        task_id = "TASK-VUK"
+        task = make_task(session, task_id, status="completed")
+        task.validators = ["nonexistent-validator"]
+        session.flush()
+
+        _make_run(session, task_id)
+        _make_agent_branch(git_repo, task_id)
+
+        result = validate_task(session, task_id, str(git_repo))
+
+        unknown_check = next(
+            (c for c in result["checks"] if c["name"] == "nonexistent-validator"), None
+        )
+        assert unknown_check is not None
+        assert unknown_check["passed"] is False
+        assert "not found in registry" in unknown_check["output"]
+
+    def test_llm_acceptance_skipped_when_no_criteria(self, session, git_repo):
+        """llm-acceptance check is skipped (passes) when task has no acceptance criteria."""
+        task_id = "TASK-VLA"
+        task = make_task(session, task_id, status="completed")
+        task.acceptance = []
+        task.validators = []
+        session.flush()
+
+        _make_run(session, task_id)
+        _make_agent_branch(git_repo, task_id)
+
+        result = validate_task(session, task_id, str(git_repo))
+
+        llm_check = next(c for c in result["checks"] if c["name"] == "llm-acceptance")
+        assert llm_check["passed"] is True
+        assert "skipped" in llm_check["output"].lower()
 
     # ---------------------------------------------------------------------------
     # Provenance gate tests
@@ -316,7 +508,6 @@ class TestValidateTask:
         _make_agent_branch(git_repo, task_id, extra_files={"util.py": "x = 1\n"})
         _make_run(session, task_id)
 
-        # No ArtifactProvenance row — absent row means "agent", OK to validate.
         results = validate_task(session, task_id, str(git_repo))
         assert results["passed"] is True
         session.refresh(task)

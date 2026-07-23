@@ -30,8 +30,9 @@ Rules:
 
 QA-specific guidance:
 - Read every input artifact in the context package before drawing conclusions.
-- Run tests via run_command -- at minimum ruff check and pytest. Capture returncode,
-  stdout, and stderr in your report verbatim so findings are reproducible.
+- Run every check listed in the validation checklist from your context package via
+  run_command. Capture returncode, stdout, and stderr in your report verbatim so
+  findings are reproducible.
 - Write a structured QA report to the output path declared in the task spec
   (conventionally reports/qa/{task_id}.md) using this layout:
 
