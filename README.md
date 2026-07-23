@@ -63,13 +63,20 @@ orchctl merge TASK-001 --repo PATH      merge validated branch to main
 orchctl COMMAND --help                  command-specific help
 ```
 
-## Further reading
+## Documentation
 
-| Path | What's in it |
-|------|-------------|
-| `CLAUDE.md` | Architecture, invariants, every `orchctl` command documented |
-| `docs/design/orchestrator-mvp-v0.2.md` | Full design doc — task model, DAG, gateway |
-| `docs/design/phase1-retro.md` … `phase2-retro.md` | Phase retrospectives |
-| `docs/adr/` | Architectural decision records (ADR-001 … N) |
-| `permissions/validators.yaml` | Pluggable validator registry |
-| `permissions/policy.yaml` | Tier policy (auto-merge vs human-gate) |
+Full documentation is in [`docs/guide/`](docs/guide/):
+
+| Guide | |
+|-------|--|
+| [Quickstart](docs/guide/quickstart.md) | Step-by-step first run |
+| [Overview](docs/guide/overview.md) | Architecture and invariants |
+| [Task Lifecycle](docs/guide/task-lifecycle.md) | State machine, all statuses |
+| [Agents](docs/guide/agents.md) | Agent types and how to choose |
+| [Validators](docs/guide/validators.md) | Pluggable quality checks |
+| [Memory](docs/guide/memory.md) | Agent memory and expertise accumulation |
+| [CLI Reference](docs/guide/cli-reference.md) | Every `orchctl` command |
+| [Configuration](docs/guide/configuration.md) | Environment variables |
+| [API Reference](docs/guide/api-reference.md) | HTTP API for both services |
+
+`CLAUDE.md` at the repo root documents architecture invariants and contributor guidelines.
