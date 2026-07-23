@@ -8,14 +8,14 @@ Convert an architecture or specification document into an Orchestra task plan JS
 /arch-to-tasks <path-to-spec-or-architecture-file>
 ```
 
-Example: `/arch-to-tasks sandbox/sample-project/diary_spec.md`
+Example: `/arch-to-tasks diary_spec.md`
 
 ## What this skill does
 
 1. Reads the document at the path given in `$ARGUMENTS`.
 2. Analyses the content and decomposes the work into 3–5 tasks for Orchestra's specialist agents.
-3. Writes the task plan as JSON to `sandbox/sample-project/tasks.json`.
-4. Prints a summary and the command to submit the plan.
+3. Writes the task plan as JSON to `tasks.json` in the current working directory.
+4. Prints a summary and the commands to review and submit the plan.
 
 ## Instructions
 
@@ -35,7 +35,9 @@ Analyse the document carefully and produce a task plan following these rules:
 - `frontend-agent` and `qa-agent` tasks list the backend task title(s) in `depends_on` when they consume backend outputs.
 - `inputs` are files the agent reads (must already exist or be produced by a dependency).
 - `outputs` are files the agent writes (repo-relative paths).
-- `acceptance` is a list of testable criteria — specific enough to verify programmatically.
+- `acceptance` is a list of testable, behaviour-focused criteria. Do NOT mention specific
+  tools (ruff, pytest, etc.) — validators are auto-detected from output file extensions
+  and configured separately. Focus on what the code must do, not how it is checked.
 
 **Output format** — a JSON array, one object per task:
 ```json
@@ -47,8 +49,8 @@ Analyse the document carefully and produce a task plan following these rules:
     "inputs":     ["<spec-file-relative-to-repo>"],
     "outputs":    ["app/main.py", "tests/test_app.py"],
     "acceptance": [
-      "All tests pass under pytest",
-      "ruff check . passes with no errors"
+      "GET /items returns a JSON array of all items",
+      "POST /items creates a new item and returns 201 with the created object"
     ]
   },
   {
@@ -57,12 +59,17 @@ Analyse the document carefully and produce a task plan following these rules:
     "depends_on": ["<exact title of the backend task above>"],
     "inputs":     ["app/main.py"],
     "outputs":    ["frontend/index.html"],
-    "acceptance": ["Page loads and all interactions work without console errors"]
+    "acceptance": ["Page loads without console errors and all list items render"]
   }
 ]
 ```
 
-Write the JSON (formatted, 2-space indent) to `sandbox/sample-project/tasks.json`.
+Omit the `validators` field — the orchestrator auto-detects appropriate validators from
+the output file extensions (ruff + pytest for `.py` files, eslint + jest for `.ts/.js`, etc.).
+
+Determine the output path for the plan JSON:
+- If `SANDBOX_REPO_PATH` is set in the environment, write to `$SANDBOX_REPO_PATH/tasks.json`
+- Otherwise write to `tasks.json` in the current working directory
 
 After writing, print:
 - A one-line summary for each task (ID not yet known — just title and owner).
@@ -70,14 +77,15 @@ After writing, print:
 
 ```
 Review the plan:
-  cat sandbox/sample-project/tasks.json
+  cat tasks.json
 
-Submit to Orchestra (services must be running):
+Easiest submit — let the root agent handle routing and dispatch:
+  orchctl request --spec <spec-file-path>
+
+Or submit the pre-built plan directly (services must be running):
   uv run python -m agents.planner.main \
-      --plan sandbox/sample-project/tasks.json \
-      --repo  sandbox/sample-project
-
-Or via setup.sh option 3 which prompts for this file path.
+      --plan tasks.json \
+      --repo $SANDBOX_REPO_PATH
 ```
 
 Do not call any external APIs. Use only the Read and Write tools for file I/O.
