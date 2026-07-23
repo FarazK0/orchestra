@@ -57,6 +57,11 @@ Jaeger all-in-one; see ADR-007.
 Policy file + Tier 2 hard gate (Step 28 done): `permissions/policy.yaml` auto-assigns task
 tier from output path globs; `validated → merged` blocked for Tier 2 without
 `details.tier2_override=True`; CLI `--tier-2-override` flag; see ADR-008.
+Pluggable validator registry (Step 29 done): `permissions/validators.yaml` defines named
+validators (file-exists, ruff, pytest, mypy, eslint, jest, llm-acceptance); tasks store
+assigned validators; `create-task` prompts interactively to accept/edit auto-detected list;
+`validate` displays per-check results; `GET /tasks/{id}/validation` exposes history;
+`orchctl show` and `orchctl validator list` added.
 
 Phase gates and weekly breakdown are in the design doc, Part 5.
 
@@ -131,16 +136,29 @@ All canonical commands live in the Makefile. Current targets:
 
 `orchctl` commands (run via `uv run orchctl`):
 - `request "description" [--spec PATH]` — submit a change request to the root agent; the root agent decomposes it into tasks and dispatches agents automatically
-- `create-task TITLE [--owner AGENT_ID] [--accept CRITERION] [--input PATH] [--output PATH] [--depends-on TASK-ID]` — create a task manually; valid `--owner` values: `backend-agent`, `frontend-agent`, `qa-agent`, `claude-code-agent`
+- `create-task TITLE [--owner AGENT_ID] [--accept CRITERION] [--input PATH] [--output PATH] [--depends-on TASK-ID]` — create a task manually; prompts interactively to accept/edit auto-detected validators; valid `--owner` values: `backend-agent`, `frontend-agent`, `qa-agent`, `claude-code-agent`
 - `list [--status STATUS]` — list tasks
+- `show TASK-ID` — full task detail: inputs, outputs, validators, acceptance criteria, and most recent validation result (works on closed tasks too)
 - `approve TASK-ID` — advance through human approval gate (created→assigned, validated→merged)
-- `run-task TASK-ID --repo PATH` — assemble context package and start run (assigned→running)
-- `validate TASK-ID --repo PATH` — run validator (ruff + pytest) on agent branch (completed→validated/failed)
+- `run-task TASK-ID --repo PATH [--agent-id AGENT_ID]` — assemble context package and start run (assigned→running); `--agent-id` must match task owner for gateway auth
+- `validate TASK-ID --repo PATH` — run all assigned validators on agent branch, display per-check table (completed→validated/failed)
 - `merge TASK-ID --repo PATH` — merge agent branch into main via gateway, close task (validated→merged→closed)
-- `review --repo PATH` — interactive approval loop: auto-validates completed tasks, shows ruff/pytest results, prompts for merge
+- `review --repo PATH` — interactive approval loop: auto-validates completed tasks, shows per-check results, prompts for merge
+- `validator list` — show all validators in `permissions/validators.yaml` with name, auto-detect flag, and description
 - `memory list [--agent AGENT_ID] [--type TYPE] [--project PROJECT]` — list agent memory rows (human safety valve)
 - `memory show MEMORY_ID [--agent AGENT_ID]` — show full content of one memory row (accepts 8-char UUID prefix)
 - `memory delete MEMORY_ID [--agent AGENT_ID] [--reason TEXT] [--yes]` — delete a memory row and write an audit record
+- `identities [--agent AGENT-ID]` — list agent identity profiles with domain expertise, task history, and skill breakdown
+- `teach AGENT-ID "fact" [--topic TOPIC]` — inject a human-taught skill into an agent's memory (key: `skill/human/{topic}`)
+- `forget AGENT-ID TOPIC-OR-ID [--yes]` — remove a human-taught skill by topic slug or 8-char memory ID
+- `ask AGENT-ID "question" [--model MODEL]` — one-shot competency probe; LLM backend set by `orchctl config set llm-backend <claude|python>`
+- `session AGENT-ID [--model MODEL]` — multi-turn interactive identity REPL (`claude` backend: launches `claude` interactively; `python` backend: requires `ANTHROPIC_API_KEY`)
+- `config show` — show current orchctl session config (LLM backend)
+- `config set KEY VALUE` — set a session config value; `llm-backend` accepts `claude` or `python`; stored in `~/.config/orchestra/config`
+
+Orchestrator API (port 8080) — notable endpoints added in Phase 3:
+- `GET /validators` — return the validator registry from `permissions/validators.yaml`
+- `GET /tasks/{id}/validation` — return the most recent validation result (full check list) from the audit row; works after task is closed
 
 Gateway service (port 8081) — start with `uvicorn gateway.gateway.app:app --port 8081`:
 - `POST /read_artifact` — read a file from the managed repo (audited)
