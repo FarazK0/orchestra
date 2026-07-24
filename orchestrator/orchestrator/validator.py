@@ -326,6 +326,18 @@ def _check_pytest(repo: Path, t0: float) -> CheckResult:
             returncode=overall_rc,
         )
     else:
+        # Install deps from any requirements files before running pytest so
+        # managed repos that use requirements.txt (not pyproject.toml) don't
+        # fail with ModuleNotFoundError.
+        req_candidates = [
+            repo / "requirements.txt",
+            repo / "requirements-dev.txt",
+            repo / "requirements-test.txt",
+            repo / "app" / "requirements.txt",
+        ]
+        for req_path in req_candidates:
+            if req_path.exists():
+                _run_shell(f"{sys.executable} -m pip install -r {req_path} -q", cwd=repo)
         rc, stdout, stderr = _run_shell(
             f"{sys.executable} -m pytest --tb=short -q", cwd=repo
         )
