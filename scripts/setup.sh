@@ -319,13 +319,61 @@ _start_service() {
   echo "  $name: started $(_dim "(pid $!, log: $LOG_DIR/$name.log)")"
 }
 
+# Always kills the existing process and restarts — used for services that bake
+# env vars (SANDBOX_REPO_PATH, AGENT_TYPE) at startup so switching projects
+# requires a fresh process with the new values.
+_force_restart_service() {
+  local name="$1"
+  local port="${2:-}"
+  shift 2
+  local pid_file="$PID_DIR/$name.pid"
+  if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+    echo "  $name: stopping (pid $(cat "$pid_file"))..."
+    kill "$(cat "$pid_file")" 2>/dev/null || true
+    sleep 1
+  fi
+  if [ -n "$port" ]; then
+    _stale=$(lsof -ti:"$port" 2>/dev/null || true)
+    if [ -n "$_stale" ]; then
+      echo "  $name: clearing stale process on port $port (pid $_stale)..."
+      kill "$_stale" 2>/dev/null || true
+      sleep 1
+    fi
+  fi
+  rm -f "$pid_file"
+  "$@" >> "$LOG_DIR/$name.log" 2>&1 &
+  echo $! > "$pid_file"
+  echo "  $name: started $(_dim "(pid $!, log: $LOG_DIR/$name.log)")"
+}
+
+# Detect CAPABILITY_SECRET change so orchestrator + gateway also restart when
+# the secret rotates (avoids JWT mismatch between services).
+_LAST_SECRET_FILE="$PID_DIR/last_secret"
+_CURRENT_SECRET=$(grep '^CAPABILITY_SECRET=' "$ROOT/.env" 2>/dev/null | cut -d= -f2- || true)
+_LAST_SECRET=$(cat "$_LAST_SECRET_FILE" 2>/dev/null || true)
+if [ "$_CURRENT_SECRET" != "$_LAST_SECRET" ]; then
+  _SECRET_CHANGED=true
+  echo "  CAPABILITY_SECRET changed — will restart orchestrator and gateway"
+else
+  _SECRET_CHANGED=false
+fi
+echo "$_CURRENT_SECRET" > "$_LAST_SECRET_FILE"
+
 cd "$ROOT"
-_start_service orchestrator 8080 env PYTHONPATH="$ROOT" "$ROOT/.venv/bin/python" -m uvicorn orchestrator.orchestrator.api:app --port 8080
-_start_service gateway      8081 env PYTHONPATH="$ROOT" "$ROOT/.venv/bin/python" -m uvicorn gateway.gateway.app:app --port 8081
-_start_service dispatcher   ""   \
+# Orchestrator + gateway: stable across project switches; only restart if secret changed.
+if [ "$_SECRET_CHANGED" = "true" ]; then
+  _force_restart_service orchestrator 8080 env PYTHONPATH="$ROOT" "$ROOT/.venv/bin/python" -m uvicorn orchestrator.orchestrator.api:app --port 8080
+  _force_restart_service gateway      8081 env PYTHONPATH="$ROOT" "$ROOT/.venv/bin/python" -m uvicorn gateway.gateway.app:app --port 8081
+else
+  _start_service orchestrator 8080 env PYTHONPATH="$ROOT" "$ROOT/.venv/bin/python" -m uvicorn orchestrator.orchestrator.api:app --port 8080
+  _start_service gateway      8081 env PYTHONPATH="$ROOT" "$ROOT/.venv/bin/python" -m uvicorn gateway.gateway.app:app --port 8081
+fi
+# Dispatcher + root-agent: ALWAYS restart — they bake SANDBOX_REPO_PATH and AGENT_TYPE
+# at startup, so switching projects requires a fresh process with the new values.
+_force_restart_service dispatcher  ""   \
   env PYTHONPATH="$ROOT" SANDBOX_REPO_PATH="$REPO" RUN_STORE_DIR="$RUN_STORE_DIR" \
   "$ROOT/.venv/bin/python" -m orchestrator.orchestrator.dispatcher
-_start_service root-agent   ""   \
+_force_restart_service root-agent  ""   \
   env PYTHONPATH="$ROOT" SANDBOX_REPO_PATH="$REPO" AGENT_TYPE="${AGENT_TYPE:-claude-code}" \
   "$ROOT/.venv/bin/python" -m agents.root.main
 

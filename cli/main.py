@@ -318,11 +318,18 @@ def list_tasks(
     status: Optional[list[str]] = typer.Option(
         None, "--status", "-s", help="Filter by status (repeatable)."
     ),
+    all_projects: bool = typer.Option(
+        False, "--all", "-a", help="Show tasks from all projects (default: current SANDBOX_REPO_PATH only)."
+    ),
 ) -> None:
     """List tasks, newest last."""
     params: dict = {}
     if status:
         params["status"] = status
+    if not all_projects:
+        project_path = os.getenv("SANDBOX_REPO_PATH")
+        if project_path:
+            params["project_path"] = str(Path(project_path).resolve())
 
     with _client() as c:
         resp = c.get("/tasks", params=params)

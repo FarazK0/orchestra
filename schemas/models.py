@@ -67,6 +67,7 @@ class Task(BaseModel):
     spawn_depth: int = 0
     blocked_by: list[str] = Field(default_factory=list)
     checkpoint: dict | None = None
+    project_path: str | None = None
 
 
 # ---------------------------------------------------------------------------

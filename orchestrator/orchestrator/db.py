@@ -63,6 +63,7 @@ class Task(Base):
     spawn_depth: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     blocked_by: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     checkpoint: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    project_path: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -102,6 +103,7 @@ class Run(Base):
         Numeric(precision=10, scale=6), nullable=False, default=0
     )
     log_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    repo_path: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AuditRow(Base):

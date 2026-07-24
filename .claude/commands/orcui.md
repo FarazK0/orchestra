@@ -43,7 +43,9 @@ cd /mnt/d/orc/orchestra && uv run python -m cli.main list
 ```
 
 ```bash
-git -C /mnt/d/orc/orchestra/sandbox/sample-project branch --show-current 2>/dev/null || echo "(no sandbox repo)"
+SANDBOX_REPO_PATH=$(grep '^SANDBOX_REPO_PATH=' /mnt/d/orc/orchestra/.env 2>/dev/null | cut -d= -f2-)
+SANDBOX_REPO_PATH="${SANDBOX_REPO_PATH:-/mnt/d/orc/orchestra/sandbox/sample-project}"
+git -C "$SANDBOX_REPO_PATH" branch --show-current 2>/dev/null || echo "(sandbox not configured)"
 ```
 
 Present as:
@@ -66,16 +68,23 @@ Present as:
 
 Map natural language to commands using this table. Run the command, print it, print the result.
 
+**Before running any command that takes `--repo`:** read `SANDBOX_REPO_PATH` from `.env`:
+```bash
+SANDBOX_REPO_PATH=$(grep '^SANDBOX_REPO_PATH=' /mnt/d/orc/orchestra/.env 2>/dev/null | cut -d= -f2-)
+SANDBOX_REPO_PATH="${SANDBOX_REPO_PATH:-/mnt/d/orc/orchestra/sandbox/sample-project}"
+```
+
 | User says | Run |
 |---|---|
 | show tasks / list | `uv run python -m cli.main list` |
+| show all tasks / list all | `uv run python -m cli.main list --all` |
 | show \<status\> tasks | `uv run python -m cli.main list --status <status>` |
 | show task N / detail for task N | `uv run python -m cli.main show TASK-00N` |
 | approve task N / approve TASK-00N | `uv run python -m cli.main approve TASK-00N` |
-| run task N | `uv run python -m cli.main run-task TASK-00N --repo sandbox/sample-project --agent-id <owner>` |
-| validate task N | `uv run python -m cli.main validate TASK-00N --repo sandbox/sample-project` |
-| merge task N | `uv run python -m cli.main merge TASK-00N --repo sandbox/sample-project` |
-| review / approval loop | `uv run python -m cli.main review --repo sandbox/sample-project` |
+| run task N | `uv run python -m cli.main run-task TASK-00N --repo "$SANDBOX_REPO_PATH" --agent-id <owner>` |
+| validate task N | `uv run python -m cli.main validate TASK-00N --repo "$SANDBOX_REPO_PATH"` |
+| merge task N | `uv run python -m cli.main merge TASK-00N --repo "$SANDBOX_REPO_PATH"` |
+| review / approval loop | `uv run python -m cli.main review --repo "$SANDBOX_REPO_PATH"` |
 | request / submit change "\<desc\>" | `uv run python -m cli.main request "<desc>"` |
 | start project / new run \<spec\> | `bash scripts/setup.sh --spec <spec>` |
 | show logs / tail logs | `tail -50 /tmp/orchestra/logs/dispatcher.log /tmp/orchestra/logs/root-agent.log` |

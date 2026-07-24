@@ -473,6 +473,7 @@ def create_run(
         branch=branch,
         context_package_ref=str(package_path),
         started_at=now,
+        repo_path=str(repo_path),
     )
     session.add(run)
     session.flush()

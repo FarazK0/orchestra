@@ -164,6 +164,7 @@ class TaskCreate(BaseModel):
     # v0.3 adaptive lifecycle
     parent_task_id: str | None = None
     spawn_depth: int = 0
+    project_path: str | None = None
 
 
 class TransitionRequest(BaseModel):
@@ -326,6 +327,7 @@ def create_task(body: TaskCreate, session: SessionDep) -> TaskSchema:
         budget=body.budget.model_dump(),
         parent_task_id=body.parent_task_id,
         spawn_depth=body.spawn_depth,
+        project_path=body.project_path,
         created_at=now,
         updated_at=now,
     )
@@ -338,10 +340,13 @@ def create_task(body: TaskCreate, session: SessionDep) -> TaskSchema:
 def list_tasks(
     session: SessionDep,
     status: list[str] = Query(default=[]),
+    project_path: list[str] = Query(default=[]),
 ) -> list[TaskSchema]:
     q = select(TaskORM).order_by(TaskORM.created_at)
     if status:
         q = q.where(TaskORM.status.in_(status))
+    if project_path:
+        q = q.where(TaskORM.project_path.in_(project_path))
     rows = session.execute(q).scalars().all()
     return [TaskSchema.model_validate(t) for t in rows]
 

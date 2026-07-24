@@ -617,6 +617,7 @@ def _submit_tasks(
                 "outputs": task_def.get("outputs", []),
                 "acceptance": task_def.get("acceptance", []),
                 "risk_tier": 1,
+                "project_path": str(repo_path) if repo_path else None,
             }
             resp = client.post("/tasks", json=payload)
             resp.raise_for_status()

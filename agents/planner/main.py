@@ -39,7 +39,7 @@ _topo_sort = topo_sort
 _parse_task_plan = parse_task_plan
 
 
-def _submit(plan: list[dict], orch_url: str) -> None:
+def _submit(plan: list[dict], orch_url: str, repo_path: Path | None = None) -> None:
     """Create tasks and approve roots via the orchestrator API."""
     ordered = _topo_sort(plan)
     title_to_id: dict[str, str] = {}
@@ -57,6 +57,7 @@ def _submit(plan: list[dict], orch_url: str) -> None:
                 "outputs": task_def.get("outputs", []),
                 "acceptance": task_def.get("acceptance", []),
                 "risk_tier": 1,
+                "project_path": str(repo_path) if repo_path else None,
             }
             for _attempt in range(3):
                 try:
@@ -188,7 +189,7 @@ def main(
         raise typer.Exit(1)
 
     typer.echo(f"Plan: {len(task_plan)} tasks")
-    _submit(task_plan, orch_url)
+    _submit(task_plan, orch_url, repo_path=repo_path)
 
 
 if __name__ == "__main__":

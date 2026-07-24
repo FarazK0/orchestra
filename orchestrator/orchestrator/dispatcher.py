@@ -217,7 +217,8 @@ class Dispatcher:
                 [t.id for t in conflicts],
             )
             return  # _recover_stale will retry once conflicts clear
-        run = create_run(session, task_id, task.owner, self._repo_path, self._store_dir)
+        repo = Path(task.project_path) if task.project_path else self._repo_path
+        run = create_run(session, task_id, task.owner, repo, self._store_dir)
         run.log_path = str(self._store_dir / "logs" / f"{run.run_id}.log")
         if not self._preflight_check(run, session, task_id):
             return
@@ -634,7 +635,7 @@ class Dispatcher:
                 "--run-id",
                 str(run.run_id),
                 "--repo",
-                str(self._repo_path),
+                run.repo_path or str(self._repo_path),
             ],
             stdout=log_file,
             stderr=subprocess.STDOUT,
