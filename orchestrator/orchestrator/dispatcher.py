@@ -133,8 +133,14 @@ def _merge_expertise_section(content: str, new_tags: list[str], task_id: str) ->
     return rebuilt[:2000]
 
 
-# Maps agent_id to the Python module used to launch that agent.
-# Unknown agent_ids fall back to the backend agent.
+# Maps agent identity → Python module for AGENT_TYPE=python mode.
+# In claude-code mode (default), _launch_agent routes all domain identities
+# (backend-agent, frontend-agent, qa-agent, and any arbitrary string) through
+# agents.claude_code.main, ignoring this table — except for claude-code-agent,
+# which always goes here regardless of AGENT_TYPE (it is an execution-backend
+# alias, not a domain identity, so it must never be re-routed).
+# The agents.backend.main fallback for unknown identities is a placeholder;
+# a generic Python agent loop (agents.generic.main) is future work (shelved).
 _AGENT_MODULES: dict[str, str] = {
     "backend-agent": "agents.backend.main",
     "frontend-agent": "agents.frontend.main",
@@ -603,6 +609,10 @@ class Dispatcher:
 
     def _launch_agent(self, run: Run) -> None:
         agent_type = os.getenv("AGENT_TYPE", "claude-code")
+        # claude-code mode: route every domain identity through the claude CLI.
+        # claude-code-agent is excluded here because it is an execution-backend alias
+        # (not a domain identity) and must always fall through to _AGENT_MODULES,
+        # which maps it to agents.claude_code.main regardless of AGENT_TYPE.
         if (
             agent_type != "python"
             and run.agent_id in _AGENT_MODULES

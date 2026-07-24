@@ -1,31 +1,61 @@
 # Agents
 
-Orchestra supports two categories of agent worker. The choice affects how tasks are
-executed and what credentials are required, but not the task model, DAG, or audit trail —
-those are identical in both cases.
+Orchestra uses a two-layer model for agent execution. Understanding this distinction
+avoids confusion when reading task output or choosing agent identities.
 
 ---
 
-## Agent types
+## Two-layer model
 
-### `claude-code-agent` (recommended)
+**Layer 1 — Execution backend** (set once at platform level via `AGENT_TYPE`):
 
-Launches the `claude` CLI as a subprocess. The CLI handles its own authentication
-(`claude login`) and manages the full LLM conversation internally.
+| `AGENT_TYPE` | What runs | Credential needed |
+|---|---|---|
+| `claude-code` (default) | `agents.claude_code.main` — launches the `claude` CLI subprocess | `claude login` (no API key) |
+| `python` | Identity-specific Python loop per task | `ANTHROPIC_API_KEY` in `.env` |
 
-**Pros**
-- No `ANTHROPIC_API_KEY` needed in `.env`
-- Uses the same `claude` session you are already authenticated with
-- Full Claude Code toolset available inside the agent (web search, MCP, etc.)
-- Best raw capability for mixed tasks that span multiple layers
+**Layer 2 — Agent identity** (set per task via `task.owner`):
 
-**Cons**
-- Individual file writes are not separately audited through the gateway (the CLI does
-  its own writes; branch creation and git commit still go through the gateway)
-- Less predictable token/cost accounting (usage is in the Claude Code billing dashboard,
-  not in Orchestra's `runs` table)
+Determines the role description, domain expertise, and skill memories injected into
+whichever backend runs. The identity travels with the task, not with the platform.
 
-**How it runs**
+Recommended identities and their specialisations:
+
+| Identity | Specialises in |
+|---|---|
+| `backend-agent` | APIs, data models, business logic, migrations, server tests |
+| `frontend-agent` | HTML, CSS, JS, templates, browser interaction |
+| `qa-agent` | Test plans, QA reports, risk assessment (no implementation) |
+| *(any string)* | Arbitrary specialisation — the identity system accepts any value and seeds context from accumulated memories |
+
+**These two concerns are independent.** `AGENT_TYPE` never changes per task. `task.owner`
+never changes which execution backend runs.
+
+### Dispatch table
+
+| `task.owner` | `AGENT_TYPE=claude-code` (default) | `AGENT_TYPE=python` |
+|---|---|---|
+| `backend-agent` | `agents.claude_code.main` (backend identity) | `agents.backend.main` |
+| `frontend-agent` | `agents.claude_code.main` (frontend identity) | `agents.frontend.main` |
+| `qa-agent` | `agents.claude_code.main` (QA identity) | `agents.qa.main` |
+| *(any other string)* | `agents.claude_code.main` (identity from memory) | `agents.backend.main`† |
+| `claude-code-agent`‡ | `agents.claude_code.main` (no domain identity) | `agents.claude_code.main` |
+
+†Unknown identities in python mode fall back to `agents.backend.main` as a placeholder.
+A generic Python agent loop that handles arbitrary identities is future work (shelved).
+
+‡`claude-code-agent` is a technical escape hatch — it always routes to the claude CLI
+and injects no domain specialisation. Do not use it as a task identity in new plans;
+assign a domain identity instead.
+
+---
+
+## Execution backends
+
+### Claude Code backend (default)
+
+Launched when `AGENT_TYPE=claude-code` (or unset). The `agents.claude_code.main` module
+builds a rich system prompt from the context package and runs:
 
 ```
 Dispatcher
@@ -36,38 +66,26 @@ Dispatcher
         └─► subprocess: claude --dangerously-skip-permissions -p "<prompt>"
 ```
 
-The `claude_code` agent builds a rich system prompt from the context package — task
-spec, acceptance criteria, validation checklist, memory extracts — then calls
-`claude --dangerously-skip-permissions` and streams the result to the log.
+**Pros**
+- No `ANTHROPIC_API_KEY` needed in `.env`
+- Uses the same `claude` session you are already authenticated with
+- Full Claude Code toolset available inside the agent (web search, MCP, etc.)
+
+**Cons**
+- Individual file writes are not separately audited through the gateway (branch creation
+  and git commit still go through the gateway)
+- Token/cost accounting is in the Claude Code billing dashboard, not in Orchestra's `runs` table
 
 ---
 
-### Python loop agents
+### Python loop backend
 
-Custom Python loops that call the Anthropic API directly through
-`agents/shared/llm.py`. Each loop implements the tool-calling agentic loop
-(read → think → act → read → …) and hits the gateway for every side effect.
-
-| Agent ID | Module | Specialty |
-|----------|--------|-----------|
-| `backend-agent` | `agents.backend.main` | APIs, data models, business logic, tests |
-| `frontend-agent` | `agents.frontend.main` | HTML, CSS, JS, templates |
-| `qa-agent` | `agents.qa.main` | QA reports, test plans, risk assessment |
-
-**Pros**
-- Every gateway call (read, write, command) is individually audited
-- Token and cost tracked per-run in Orchestra's `runs` table
-- Fully deterministic tool loop — easier to debug and extend
-
-**Cons**
-- Requires `ANTHROPIC_API_KEY` in `.env`
-- Smaller effective toolset than the Claude Code CLI
-
-**How a Python agent runs**
+Launched when `AGENT_TYPE=python`. Custom Python loops that call the Anthropic API
+directly through `agents/shared/llm.py`.
 
 ```
 Dispatcher
-  └─► python -m agents.backend.main
+  └─► python -m agents.backend.main   (or frontend.main / qa.main)
         --context /tmp/orchestra/runs/<run_id>.json
         --run-id <uuid>
         [--repo PATH] [--gateway-url URL] [--orchestrator-url URL]
@@ -79,21 +97,14 @@ The agent loop in `agents/shared/loop.py`:
 3. Enters the tool-calling loop: calls LLM → executes tools via gateway → feeds results back
 4. Continues until the model calls `task_complete` or the budget is exceeded
 
----
+**Pros**
+- Every gateway call (read, write, command) is individually audited
+- Token and cost tracked per-run in Orchestra's `runs` table
+- Fully deterministic tool loop — easier to debug and extend
 
-## Routing
-
-The `owner` field on a task determines which agent type runs it:
-
-```bash
-orchctl create-task "Add login endpoint" --owner backend-agent
-orchctl create-task "Add login page"     --owner frontend-agent
-orchctl create-task "Write QA report"    --owner qa-agent
-orchctl create-task "Implement auth"     --owner claude-code-agent
-```
-
-When using `orchctl request` or `orchctl request --spec`, the root agent picks the
-owner automatically based on the nature of the work.
+**Cons**
+- Requires `ANTHROPIC_API_KEY` in `.env`
+- Smaller effective toolset than the Claude Code CLI
 
 ---
 
@@ -136,7 +147,7 @@ to the paths in `task.outputs` only. The gateway verifies this token on every re
 ## Agent tools (gateway API)
 
 Agents call the gateway via HTTP. Python loop agents receive these as Anthropic tool
-definitions; claude-code-agent uses the MCP-compatible tools automatically.
+definitions; the claude-code backend has gateway tools available through MCP.
 
 | Tool | Endpoint | What it does |
 |------|----------|-------------|

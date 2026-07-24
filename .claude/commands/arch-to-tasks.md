@@ -23,11 +23,14 @@ Read the file at the path provided in `$ARGUMENTS`. If no path is given, tell th
 
 Analyse the document carefully and produce a task plan following these rules:
 
-**Agents available:**
-- `backend-agent` — server-side code: APIs, data models, business logic, database, tests
-- `frontend-agent` — client-side code: HTML, CSS, JavaScript, single-page UI, browser interaction
-- `qa-agent` — quality assurance: test plans, QA reports, edge-case analysis, risk assessment
-- `claude-code-agent` — general purpose: Claude Code CLI as the worker; suitable when a single capable agent can handle the full implementation without specialist separation
+**Agent identities** (the `owner` field sets domain specialisation, not the execution backend):
+- `backend-agent` — backend specialist: APIs, data models, business logic, migrations, server tests
+- `frontend-agent` — frontend specialist: HTML, CSS, JS, templates, browser interaction
+- `qa-agent` — QA specialist: test plans, QA reports, risk assessment (no implementation)
+
+If a task genuinely spans all layers, assign the identity that owns the majority of
+outputs, or split into two tasks with a `depends_on` relationship. The execution backend
+(claude CLI or Python loops) is a platform-level setting — do not factor it into owner assignment.
 
 **Task plan rules:**
 - Keep the plan to 3–5 tasks. Do not create tasks for work an agent can handle internally.

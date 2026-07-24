@@ -42,8 +42,11 @@ orchctl create-task TITLE \
 ```
 
 Options:
-- `--owner` — agent to assign. One of: `backend-agent`, `frontend-agent`, `qa-agent`,
-  `claude-code-agent`. Default: `backend-agent`
+- `--owner` — agent identity for this task. Sets the specialisation context (role
+  description, domain expertise) injected into every run. Recommended values:
+  `backend-agent`, `frontend-agent`, `qa-agent`. Any string is accepted. The
+  execution backend (claude CLI or Python loop) is set by `AGENT_TYPE` at the
+  platform level, not by this flag. Default: `backend-agent`
 - `--accept` — acceptance criterion (repeatable)
 - `--input` — input file path in the target repo (repeatable)
 - `--output` — output file path in the target repo (repeatable); used for auto-detection

@@ -74,10 +74,14 @@ as your control panel. Requires the `claude` CLI.
 ```
 
 - **Claude Code agent** — the `claude` CLI is the agent worker. No `ANTHROPIC_API_KEY`
-  needed. Agents run as `claude-code-agent`.
+  needed.
 - **Python agents** — custom loops that call the Anthropic API directly. Requires
-  `ANTHROPIC_API_KEY` in `.env`. Tasks can be routed to `backend-agent`,
-  `frontend-agent`, or `qa-agent` separately.
+  `ANTHROPIC_API_KEY` in `.env`. Routes tasks to `backend-agent`, `frontend-agent`,
+  or `qa-agent` specialised loops.
+
+`AGENT_TYPE` sets the execution backend for the whole platform. Each task independently
+carries an agent identity (`task.owner`) that determines what specialisation context the
+backend receives — these two settings are independent of each other.
 
 ### What setup does
 

@@ -31,22 +31,29 @@ A human has submitted a change request for an existing software project.
 You will be given the current state of the project (file tree and recent git log)
 and the change request.
 
-Decompose the change into tasks for these agents:
+Decompose the change into tasks. Assign each task an agent identity (the "owner" field)
+that reflects the domain specialisation the agent brings to the work:
 
-  backend-agent      -- server-side: APIs, data models, business logic, migrations, tests
-  frontend-agent     -- client-side: HTML, CSS, JavaScript, single-page UI, templates
-  qa-agent           -- quality only: test plans, QA reports, risk assessment (no implementation)
-  claude-code-agent  -- cross-cutting: tasks that genuinely span all layers and cannot
-                       be cleanly assigned to a single specialist
+  backend-agent   -- specialises in: APIs, data models, business logic, migrations, tests
+  frontend-agent  -- specialises in: HTML, CSS, JavaScript, UI templates, browser interaction
+  qa-agent        -- specialises in: test plans, QA reports, risk assessment (no new features)
+
+The execution backend (which code actually runs the LLM loop) is a system-wide setting
+and is NOT determined by the owner field. Assign the identity whose specialisation best
+matches the task's domain outputs. For tasks that genuinely span all layers, assign the
+identity of the layer that owns the most outputs, or split into separate tasks with a
+depends_on relationship.
 
 """
     + _TASK_JSON_SCHEMA
     + """
 Rules:
-- Use backend-agent for server-side work (APIs, DB models, business logic).
+- Use backend-agent for server-side work (APIs, DB models, business logic, migrations).
 - Use frontend-agent for client-side work (HTML, CSS, JS, UI templates).
 - Use qa-agent for test-only tasks that validate existing features, not implement them.
-- Use claude-code-agent only for tasks that genuinely cross all layers.
+- For cross-cutting tasks that span all layers, assign the identity that owns the
+  majority of outputs. If the task would have more than 5 acceptance criteria or span
+  more than one major subsystem, split it with a depends_on relationship instead.
 - backend-agent tasks have no depends_on (they are always roots).
 - frontend-agent and qa-agent tasks depend on the backend tasks whose outputs they consume.
 - Root tasks (no depends_on) will be dispatched immediately.
@@ -66,7 +73,7 @@ Coverage check (run before returning the plan):
 1. List every top-level directory and cross-cutting file the change requires.
 2. For each item, verify it is covered by at least one task's outputs list.
 3. If any item is uncovered, assign it to the most relevant existing task's outputs
-   or add a new task (owner: claude-code-agent) to cover it.
+   or add a new task to cover it (use the identity that best matches the uncovered outputs).
 Never return a plan where a file the change explicitly requires has no owning task.
 
 Task size limit:
