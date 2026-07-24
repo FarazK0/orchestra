@@ -273,28 +273,45 @@ echo "  Migrations: $(_green 'OK')"
 
 # ── 6. Sandbox git repo ───────────────────────────────────────────────────────
 sep "Initialising sandbox project repo"
-if [ ! -d "$REPO/.git" ]; then
+if [[ "$ROOT" == "$REPO/"* ]]; then
+  # Orchestra is cloned inside the target project — git init on the parent would
+  # create an embedded repo (git warns about this and clones break).
+  echo "  Note: Orchestra is installed inside the target project — skipping git init."
+  echo "  If your project is not yet a git repo, run: git -C \"$REPO\" init"
+elif [ -d "$REPO/.git" ]; then
+  echo "  Already initialised"
+else
   cd "$REPO"
-  git init -b main
+  git init -b main -q
   git config user.email "demo@orchestra"
   git config user.name "Orchestra Demo"
   git add .
-  git commit -m "chore: initial sample project" -q
+  git commit -m "chore: initial project" -q 2>/dev/null || true
   cd "$ROOT"
   echo "  Initialised at $REPO"
-else
-  echo "  Already initialised"
 fi
 
 # ── 7. Background services ────────────────────────────────────────────────────
 sep "Starting platform services"
 
 _start_service() {
-  local name="$1"; shift
+  local name="$1"
+  local port="${2:-}"   # optional HTTP port; cleared before binding if stale process holds it
+  shift 2
   local pid_file="$PID_DIR/$name.pid"
+  # If our own PID is still alive, the service is already running — skip.
   if [ -f "$pid_file" ] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
     echo "  $name: already running (pid $(cat "$pid_file"))"
     return
+  fi
+  # Kill any stale process (different session / different PID) that still holds the port.
+  if [ -n "$port" ]; then
+    _stale=$(lsof -ti:"$port" 2>/dev/null || true)
+    if [ -n "$_stale" ]; then
+      echo "  $name: clearing stale process on port $port (pid $_stale)..."
+      kill "$_stale" 2>/dev/null || true
+      sleep 1
+    fi
   fi
   rm -f "$pid_file"
   "$@" >> "$LOG_DIR/$name.log" 2>&1 &
@@ -303,12 +320,12 @@ _start_service() {
 }
 
 cd "$ROOT"
-_start_service orchestrator env PYTHONPATH="$ROOT" "$ROOT/.venv/bin/python" -m uvicorn orchestrator.orchestrator.api:app --port 8080
-_start_service gateway      env PYTHONPATH="$ROOT" "$ROOT/.venv/bin/python" -m uvicorn gateway.gateway.app:app --port 8081
-_start_service dispatcher \
+_start_service orchestrator 8080 env PYTHONPATH="$ROOT" "$ROOT/.venv/bin/python" -m uvicorn orchestrator.orchestrator.api:app --port 8080
+_start_service gateway      8081 env PYTHONPATH="$ROOT" "$ROOT/.venv/bin/python" -m uvicorn gateway.gateway.app:app --port 8081
+_start_service dispatcher   ""   \
   env PYTHONPATH="$ROOT" SANDBOX_REPO_PATH="$REPO" RUN_STORE_DIR="$RUN_STORE_DIR" \
   "$ROOT/.venv/bin/python" -m orchestrator.orchestrator.dispatcher
-_start_service root-agent \
+_start_service root-agent   ""   \
   env PYTHONPATH="$ROOT" SANDBOX_REPO_PATH="$REPO" AGENT_TYPE="${AGENT_TYPE:-claude-code}" \
   "$ROOT/.venv/bin/python" -m agents.root.main
 
@@ -402,14 +419,15 @@ if [ -n "$SPEC" ]; then
     _AUTO_PLAN="$RUN_STORE_DIR/auto-plan.json"
     echo "  Using claude CLI to decompose spec (no API key required)..."
     echo "  $(_dim 'Reading spec and planning tasks — usually takes 30-90 seconds...')"
-    _OWNER_RULES='Agent routing rules:
-  backend-agent     -- APIs, DB models, business logic, migrations, server-side tests
-  frontend-agent    -- HTML, CSS, JavaScript, single-page UI, browser templates
-  qa-agent          -- test plans and QA reports only, no new feature implementation
-  claude-code-agent -- only for tasks that genuinely span all layers
+    _OWNER_RULES='Agent identities (owner sets domain specialisation, not execution backend):
+  backend-agent   -- specialises in: APIs, data models, business logic, migrations, tests
+  frontend-agent  -- specialises in: HTML, CSS, JS, templates, browser interaction
+  qa-agent        -- specialises in: test plans, QA reports, risk assessment (no implementation)
+For cross-cutting tasks, assign the identity that owns the majority of outputs, or split
+into two tasks with a depends_on relationship.
 Additional rules: backend-agent tasks have empty depends_on (they are roots);
 frontend-agent and qa-agent tasks list their backend dependency in depends_on.'
-    _OWNER_FIELD='"owner": "backend-agent" or "frontend-agent" or "qa-agent" or "claude-code-agent"'
+    _OWNER_FIELD='"owner": "backend-agent" or "frontend-agent" or "qa-agent"'
     env -u ANTHROPIC_API_KEY claude --dangerously-skip-permissions -p \
       "Read the spec file at $REPO/$SPEC and produce an Orchestra task plan.
 Return ONLY a JSON array, no explanation or markdown. Each element:

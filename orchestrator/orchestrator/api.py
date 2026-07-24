@@ -62,6 +62,16 @@ async def _lifespan(app: FastAPI):
         _instrumentator.expose(app)
         _metrics_exposed = True
     get_policy()  # warm the cache; logs a warning if file absent
+    # Warm the DB connection pool so /healthz becomes a true readiness signal.
+    # Without this the first POST /tasks has to initialise the pool under request
+    # timeout, which can fail when all services start simultaneously.
+    from sqlalchemy import text as _text
+    try:
+        with _factory()() as _sess:
+            _sess.execute(_text("SELECT 1"))
+        log.info("DB connection pool ready")
+    except Exception as _exc:
+        log.warning("DB warmup failed (%s) — first request may be slow", _exc)
     yield
 
 

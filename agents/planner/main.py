@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import httpx
@@ -57,7 +58,14 @@ def _submit(plan: list[dict], orch_url: str) -> None:
                 "acceptance": task_def.get("acceptance", []),
                 "risk_tier": 1,
             }
-            resp = client.post("/tasks", json=payload)
+            for _attempt in range(3):
+                try:
+                    resp = client.post("/tasks", json=payload)
+                    break
+                except (httpx.ReadTimeout, httpx.ConnectError):
+                    if _attempt == 2:
+                        raise
+                    time.sleep(2 * (_attempt + 1))
             if resp.is_error:
                 typer.echo(
                     f"ERROR creating task {task_def['title']!r}: {resp.status_code} {resp.text}",
