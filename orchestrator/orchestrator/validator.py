@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -91,6 +92,7 @@ class CheckResult:
     output: str
     duration_s: float
     returncode: int | None = None
+    failure_category: str | None = None  # "pre_existing" | "env_limitation"
 
 
 # ---------------------------------------------------------------------------
@@ -285,14 +287,16 @@ def _check_llm_acceptance(repo: Path, branch: str, task: Task) -> CheckResult:
 # ---------------------------------------------------------------------------
 
 
-def _check_shell(name: str, cfg: dict, repo: Path) -> CheckResult:
+def _check_shell(name: str, cfg: dict, repo: Path, branch: str = "") -> CheckResult:
     """Run a shell-command validator."""
     t0 = time.monotonic()
     cmd: str = cfg["command"]
 
-    # pytest: honour existing subdirectory-with-pyproject pattern
     if name == "pytest":
         return _check_pytest(repo, t0)
+
+    if name == "ruff":
+        return _check_ruff(repo, branch, t0)
 
     rc, stdout, stderr = _run_shell(cmd, cwd=repo)
     out = (stdout + stderr).strip()[:800]
@@ -354,14 +358,14 @@ def _check_pytest(repo: Path, t0: float) -> CheckResult:
                     if req_path.name == "requirements.txt":
                         primary_req_failed = True
         if primary_req_failed:
-            # Soft-pass: primary deps uninstallable (e.g. torch); don't block merge.
             return CheckResult(
                 name="pytest",
-                passed=True,
-                output="WARN: requirements.txt install failed; pytest skipped.\n"
+                passed=False,
+                output="requirements.txt install failed; cannot run pytest.\n"
                 + "\n".join(dep_install_notes),
                 duration_s=time.monotonic() - t0,
                 returncode=None,
+                failure_category="env_limitation",
             )
         rc, stdout, stderr = _run_shell(f"{sys.executable} -m pytest --tb=short -q", cwd=repo)
         passed = rc in (0, 5)
@@ -372,6 +376,58 @@ def _check_pytest(repo: Path, t0: float) -> CheckResult:
             duration_s=time.monotonic() - t0,
             returncode=rc,
         )
+
+
+_RUFF_CONCISE_RE = re.compile(r"^([^:\s][^:]*?):\d+:\d+:")
+
+
+def _check_ruff(repo: Path, branch: str, t0: float) -> CheckResult:
+    """Ruff check with pre-existing error detection.
+
+    If ruff fails only on files the agent never touched (not in git diff vs main),
+    the errors pre-date the agent's work — soft-pass with failure_category="pre_existing"
+    so the merge is not blocked, but the category is recorded in the audit trail.
+
+    Uses --output-format=concise to get stable file:line:col: CODE output regardless
+    of terminal settings (the default rich format uses multi-line blocks with "help:"
+    lines that are unsafe to parse for file names).
+    """
+    rc, stdout, stderr = _run_shell("ruff check . --output-format=concise", cwd=repo)
+    out = (stdout + stderr).strip()[:800]
+    if rc == 0:
+        return CheckResult(name="ruff", passed=True, output=out,
+                           duration_s=time.monotonic() - t0, returncode=0)
+
+    # Extract file names from concise format: "path/to/file.py:line:col: CODE msg"
+    error_files: set[str] = set()
+    for line in stdout.splitlines():
+        m = _RUFF_CONCISE_RE.match(line)
+        if m:
+            error_files.add(m.group(1))
+
+    # Get files changed by the agent on this branch vs main.
+    _, diff_out, _ = _git(repo, "diff", "--name-only", "main", branch)
+    if not diff_out:
+        _, diff_out, _ = _git(repo, "diff", "--name-only", f"{branch}^", branch)
+    changed = set(diff_out.splitlines())
+
+    untouched = error_files - changed
+    agent_errors = error_files & changed
+
+    if untouched and not agent_errors:
+        # All ruff errors are in files the agent never modified — pre-existing debt.
+        return CheckResult(
+            name="ruff",
+            passed=True,
+            output=f"WARN: pre-existing ruff errors in {sorted(untouched)} "
+                   "(outside agent scope; a cleanup task is recommended).\n" + out,
+            duration_s=time.monotonic() - t0,
+            returncode=rc,
+            failure_category="pre_existing",
+        )
+
+    return CheckResult(name="ruff", passed=False, output=out,
+                       duration_s=time.monotonic() - t0, returncode=rc)
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +509,7 @@ def validate_task(
                 "checks": [],
                 "checkout_error": checkout_error,
             }
-            _finalize(session, task_id, passed=False, actor=actor, result=result)
+            _finalize(session, task_id, passed=False, actor=actor, result=result, checks=[])
             return result
 
     # Load registry and determine which validators to run.
@@ -496,7 +552,7 @@ def validate_task(
                 )
             )
         else:
-            checks.append(_check_shell(name, cfg, repo))
+            checks.append(_check_shell(name, cfg, repo, branch=branch))
 
     # Always-on: llm-acceptance (runs only when task has acceptance criteria)
     checks.append(_check_llm_acceptance(repo, branch, task))
@@ -522,7 +578,7 @@ def validate_task(
         "checkout_error": checkout_error,
     }
 
-    _finalize(session, task_id, passed=passed, actor=actor, result=result)
+    _finalize(session, task_id, passed=passed, actor=actor, result=result, checks=checks)
 
     if not used_worktree:
         _git(Path(repo_path).resolve(), "checkout", "main")
@@ -536,16 +592,39 @@ def _finalize(
     passed: bool,
     actor: str,
     result: dict,
+    checks: list[CheckResult] | None = None,
 ) -> None:
-    new_status = "validated" if passed else "failed"
-    transition(
-        session,
-        task_id,
-        new_status,
-        actor=actor,
-        payload={"validation_passed": passed, "summary": result.get("summary", "")},
-        details=result,
-    )
+    env_blocked = [
+        c for c in (checks or [])
+        if not c.passed and c.failure_category == "env_limitation"
+    ]
+
+    if not passed and env_blocked:
+        lines = ["Validation blocked — cannot run tests due to environment limitation:"]
+        for c in env_blocked:
+            lines.append(f"\n[{c.name}]\n{c.output[:500]}")
+        lines.append(
+            "\nOptions:\n"
+            "  A) Fix the dependency issue in requirements.txt, then respond to re-run.\n"
+            "  B) Grant an override if this environment cannot install the package "
+            "(e.g. GPU-only deps in a CPU validator)."
+        )
+        task = session.execute(select(Task).where(Task.id == task_id)).scalar_one_or_none()
+        if task is not None:
+            task.checkpoint = {
+                "type": "awaiting_human",
+                "question": "\n".join(lines),
+                "question_type": "blocker",
+                "context": result.get("summary", ""),
+                "human_response": None,
+            }
+        new_status = "awaiting_human"
+        payload: dict = {"validation_passed": False, "blocker_category": "env_limitation"}
+    else:
+        new_status = "validated" if passed else "failed"
+        payload = {"validation_passed": passed, "summary": result.get("summary", "")}
+
+    transition(session, task_id, new_status, actor=actor, payload=payload, details=result)
 
     run = (
         session.execute(select(Run).where(Run.task_id == task_id).order_by(Run.started_at.desc()))

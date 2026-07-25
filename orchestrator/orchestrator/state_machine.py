@@ -47,6 +47,10 @@ TRANSITIONS: dict[tuple[str, str], str] = {
     # Resume via `orchctl respond` — human answer injected into next run's context.
     ("running", "awaiting_human"): "TASK_HUMAN_INPUT_REQUIRED",
     ("awaiting_human", "assigned"): "TASK_ASSIGNED",  # reused; dispatcher re-launches
+    # Validator-triggered: non-fixable failure detected at validation time (env_limitation)
+    ("completed", "awaiting_human"): "TASK_HUMAN_INPUT_REQUIRED",
+    # Dispatcher failsafe: env_limitation fell through to failed before validator caught it
+    ("failed", "awaiting_human"): "TASK_HUMAN_INPUT_REQUIRED",
     # Cancel from any non-terminal state
     ("created", "cancelled"): "TASK_CANCELLED",
     ("assigned", "cancelled"): "TASK_CANCELLED",

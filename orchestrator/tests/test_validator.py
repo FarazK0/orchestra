@@ -15,8 +15,11 @@ import pytest
 
 from orchestrator.orchestrator.db import Run, Task
 from orchestrator.orchestrator.validator import (
+    CheckResult,
     ValidationError,
     _check_file_exists,
+    _check_ruff,
+    _finalize,
     detect_validators,
     load_registry,
     validate_task,
@@ -512,3 +515,145 @@ class TestValidateTask:
         assert results["passed"] is True
         session.refresh(task)
         assert task.status == "validated"
+
+
+# ---------------------------------------------------------------------------
+# Blocker categorisation tests
+# ---------------------------------------------------------------------------
+
+
+class TestBlockerCategorisation:
+    """Tests for failure_category detection and awaiting_human routing."""
+
+    def test_check_ruff_pre_existing_soft_pass(self, tmp_path):
+        """Ruff errors only in files the agent never changed → soft-pass with pre_existing."""
+        import time
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-b", "main")
+        _git(repo, "config", "user.email", "t@t.com")
+        _git(repo, "config", "user.name", "T")
+
+        # Commit a file with a ruff error to main.
+        (repo / "legacy.py").write_text("import os\nx = 1\n")  # F401: os unused
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "initial with lint debt")
+
+        # Agent branch touches only a clean new file, not legacy.py.
+        branch = "agent/backend/TASK-RUF01"
+        _git(repo, "checkout", "-b", branch)
+        (repo / "new_feature.py").write_text("def foo():\n    return 42\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "add new feature")
+        _git(repo, "checkout", "main")
+        _git(repo, "checkout", branch)
+
+        result = _check_ruff(repo, branch, time.monotonic())
+
+        assert result.passed is True
+        assert result.failure_category == "pre_existing"
+        assert "pre-existing" in result.output
+
+    def test_check_ruff_agent_error_hard_fail(self, tmp_path):
+        """Ruff errors in a file the agent modified → hard fail, no category."""
+        import time
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-b", "main")
+        _git(repo, "config", "user.email", "t@t.com")
+        _git(repo, "config", "user.name", "T")
+
+        (repo / "clean.py").write_text("x = 1\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "initial")
+
+        branch = "agent/backend/TASK-RUF02"
+        _git(repo, "checkout", "-b", branch)
+        # Agent introduces an import error in the file it's supposed to change.
+        (repo / "clean.py").write_text("import os\nx = 1\n")  # F401: os unused
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "add unused import")
+        _git(repo, "checkout", "main")
+        _git(repo, "checkout", branch)
+
+        result = _check_ruff(repo, branch, time.monotonic())
+
+        assert result.passed is False
+        assert result.failure_category is None
+
+    def test_finalize_env_limitation_routes_to_awaiting_human(self, session):
+        """_finalize with an env_limitation check transitions task to awaiting_human."""
+        task_id = "TASK-BLK01"
+        make_task(session, task_id, status="completed")
+
+        checks = [
+            CheckResult(
+                name="pytest",
+                passed=False,
+                output="requirements.txt install failed",
+                duration_s=0.1,
+                failure_category="env_limitation",
+            )
+        ]
+        result = {"passed": False, "summary": "0/1 checks passed", "checks": []}
+
+        _finalize(session, task_id, passed=False, actor="validator", result=result, checks=checks)
+
+        task = session.get(Task, task_id)
+        assert task.status == "awaiting_human"
+        assert task.checkpoint is not None
+        assert task.checkpoint["question_type"] == "blocker"
+        assert "environment limitation" in task.checkpoint["question"].lower()
+        assert task.checkpoint["human_response"] is None
+
+    def test_finalize_pre_existing_does_not_block(self, session):
+        """_finalize with a pre_existing ruff soft-pass validates when overall passed=True."""
+        task_id = "TASK-BLK02"
+        make_task(session, task_id, status="completed")
+
+        checks = [
+            CheckResult(
+                name="ruff",
+                passed=True,  # soft-pass
+                output="WARN: pre-existing ruff errors in legacy.py",
+                duration_s=0.1,
+                failure_category="pre_existing",
+            )
+        ]
+        result = {"passed": True, "summary": "1/1 checks passed", "checks": []}
+
+        _finalize(session, task_id, passed=True, actor="validator", result=result, checks=checks)
+
+        task = session.get(Task, task_id)
+        assert task.status == "validated"
+
+    def test_validate_task_env_limitation_awaiting_human(self, session, git_repo):
+        """Full validate_task: broken requirements.txt → task goes to awaiting_human."""
+        task_id = "TASK-BLK03"
+        task = make_task(session, task_id, status="completed")
+        task.validators = ["pytest"]
+        task.outputs = ["new_module.py"]
+        session.flush()
+
+        # Agent branch with a requirements.txt that cannot be installed.
+        _make_agent_branch(
+            git_repo,
+            task_id,
+            extra_files={
+                "new_module.py": "x = 1\n",
+                "requirements.txt": "nonexistent-pkg-orchestra-test==99999.0\n",
+            },
+        )
+        _make_run(session, task_id)
+
+        result = validate_task(session, task_id, str(git_repo))
+
+        assert result["passed"] is False
+        pytest_check = next(c for c in result["checks"] if c["name"] == "pytest")
+        assert pytest_check["failure_category"] == "env_limitation"
+
+        task = session.get(Task, task_id)
+        assert task.status == "awaiting_human"
+        assert task.checkpoint["question_type"] == "blocker"
