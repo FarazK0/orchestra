@@ -86,6 +86,10 @@ _REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6380")
 
 @pytest.fixture(scope="session")
 def redis_url() -> str:
+    try:
+        redis_lib.Redis.from_url(_REDIS_URL, socket_connect_timeout=1).ping()
+    except Exception:
+        pytest.skip("Redis not available — run 'make up' first")
     return _REDIS_URL
 
 
