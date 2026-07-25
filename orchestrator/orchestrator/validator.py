@@ -204,10 +204,11 @@ def _check_llm_acceptance(repo: Path, branch: str, task: Task) -> CheckResult:
             duration_s=time.monotonic() - t0,
         )
 
-    # Get diff of agent branch vs main (actual patch, not just --stat)
+    # Get diff of agent branch vs main.
     rc, diff, err = _git(repo, "diff", "main", branch, "--unified=3")
     if rc != 0 or not diff:
-        rc2, diff, _ = _git(repo, "diff", "HEAD~1", "HEAD")
+        # Fallback: show the agent's most recent commit on the branch itself.
+        _, diff, _ = _git(repo, "diff", f"{branch}^", branch, "--unified=3")
     diff_block = (diff[:6000] + "\n...(truncated)") if len(diff) > 6000 else diff
 
     criteria_block = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(criteria))
@@ -331,16 +332,14 @@ def _check_pytest(repo: Path, t0: float) -> CheckResult:
             returncode=overall_rc,
         )
     else:
-        # Install deps from any requirements files before running pytest so
-        # managed repos that use requirements.txt (not pyproject.toml) don't
-        # fail with ModuleNotFoundError.
+        # Install requirements files before pytest for non-pyproject repos.
         req_candidates = [
             repo / "requirements.txt",
             repo / "requirements-dev.txt",
             repo / "requirements-test.txt",
             repo / "app" / "requirements.txt",
         ]
-        dep_install_failed = False
+        primary_req_failed = False
         dep_install_notes: list[str] = []
         for req_path in req_candidates:
             if req_path.exists():
@@ -348,19 +347,19 @@ def _check_pytest(repo: Path, t0: float) -> CheckResult:
                     f"{sys.executable} -m pip install -r {req_path} -q", cwd=repo, timeout=300
                 )
                 if pip_rc != 0:
-                    dep_install_failed = True
                     dep_install_notes.append(
                         f"pip install -r {req_path.name} failed (rc={pip_rc}): "
                         + (pip_err or pip_out).strip()[:200]
                     )
-        if dep_install_failed:
-            # Some deps could not be installed (e.g. heavy ML packages like torch).
-            # Emit WARN rather than hard-fail: the agent's code may be correct but
-            # untestable in this environment.
+                    if req_path.name == "requirements.txt":
+                        primary_req_failed = True
+        if primary_req_failed:
+            # Soft-pass: primary deps uninstallable (e.g. torch); don't block merge.
             return CheckResult(
                 name="pytest",
-                passed=True,  # soft pass — don't block merge over env limitations
-                output="WARN: dep install failed; pytest skipped.\n" + "\n".join(dep_install_notes),
+                passed=True,
+                output="WARN: requirements.txt install failed; pytest skipped.\n"
+                + "\n".join(dep_install_notes),
                 duration_s=time.monotonic() - t0,
                 returncode=None,
             )
