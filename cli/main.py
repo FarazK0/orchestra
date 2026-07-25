@@ -89,7 +89,9 @@ def _select_validators(outputs: list[str]) -> list[str]:
 
     # Separate always-on built-ins (shown for info, not stored in task.validators)
     always_on = [v for v in registry if v.get("always_run")]
-    auto_detectable = [v for v in registry if not v.get("always_run") and v.get("auto_detect", True)]
+    auto_detectable = [
+        v for v in registry if not v.get("always_run") and v.get("auto_detect", True)
+    ]
 
     # Auto-detect from output paths
     suggested: list[str] = []
@@ -105,11 +107,13 @@ def _select_validators(outputs: list[str]) -> list[str]:
     # Display what will run
     typer.echo("\n  Validators for this task:\n")
     for v in always_on:
-        typer.echo(f"    {_d('~')} {v['name']:<18} {_d(v.get('description',''))}  {_d('(always-on)')}")
+        typer.echo(
+            f"    {_d('~')} {v['name']:<18} {_d(v.get('description', ''))}  {_d('(always-on)')}"
+        )
     if suggested:
         for name in suggested:
             info = next((v for v in registry if v["name"] == name), {})
-            typer.echo(f"    {_g('✓')} {name:<18} {info.get('description','')}")
+            typer.echo(f"    {_g('✓')} {name:<18} {info.get('description', '')}")
     else:
         typer.echo(f"    {_d('(no validators auto-detected from outputs)')}")
 
@@ -117,13 +121,17 @@ def _select_validators(outputs: list[str]) -> list[str]:
     if opt_in:
         typer.echo(f"\n  {_d('Available (not auto-detected):')}")
         for v in opt_in:
-            typer.echo(f"    {_d('-')} {v['name']:<18} {_d(v.get('description',''))}")
+            typer.echo(f"    {_d('-')} {v['name']:<18} {_d(v.get('description', ''))}")
 
     typer.echo("")
-    choice = typer.prompt(
-        "  Accept validators? [Y/n/edit]",
-        default="Y",
-    ).strip().lower()
+    choice = (
+        typer.prompt(
+            "  Accept validators? [Y/n/edit]",
+            default="Y",
+        )
+        .strip()
+        .lower()
+    )
 
     if choice in ("", "y", "yes"):
         return suggested
@@ -150,7 +158,9 @@ def _select_validators(outputs: list[str]) -> list[str]:
                 selected.append(name)
                 typer.echo(f"  Added {name}. Current: {', '.join(selected)}")
             elif name not in all_names:
-                typer.echo(f"  Unknown validator {name!r}. Available: {', '.join(sorted(all_names))}")
+                typer.echo(
+                    f"  Unknown validator {name!r}. Available: {', '.join(sorted(all_names))}"
+                )
             else:
                 typer.echo(f"  {name} already in list.")
         elif cmd.startswith("-"):
@@ -189,7 +199,7 @@ def validator_list() -> None:
         always = v.get("always_run", False)
         auto = "yes" if (always or v.get("auto_detect", True)) else "opt"
         badge = " (always-on)" if always else ""
-        typer.echo(f"  {v['name']:<{name_w}}  {auto:<5}  {v.get('description','')}{badge}")
+        typer.echo(f"  {v['name']:<{name_w}}  {auto:<5}  {v.get('description', '')}{badge}")
     typer.echo("")
 
 
@@ -319,7 +329,10 @@ def list_tasks(
         None, "--status", "-s", help="Filter by status (repeatable)."
     ),
     all_projects: bool = typer.Option(
-        False, "--all", "-a", help="Show tasks from all projects (default: current SANDBOX_REPO_PATH only)."
+        False,
+        "--all",
+        "-a",
+        help="Show tasks from all projects (default: current SANDBOX_REPO_PATH only).",
     ),
 ) -> None:
     """List tasks, newest last."""

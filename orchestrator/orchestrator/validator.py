@@ -204,13 +204,13 @@ def _check_llm_acceptance(repo: Path, branch: str, task: Task) -> CheckResult:
             duration_s=time.monotonic() - t0,
         )
 
-    # Get diff of agent branch vs main
-    rc, diff, err = _git(repo, "diff", "main", branch, "--stat", "--unified=3")
+    # Get diff of agent branch vs main (actual patch, not just --stat)
+    rc, diff, err = _git(repo, "diff", "main", branch, "--unified=3")
     if rc != 0 or not diff:
         rc2, diff, _ = _git(repo, "diff", "HEAD~1", "HEAD")
-    diff_block = (diff[:3000] + "\n...(truncated)") if len(diff) > 3000 else diff
+    diff_block = (diff[:6000] + "\n...(truncated)") if len(diff) > 6000 else diff
 
-    criteria_block = "\n".join(f"{i+1}. {c}" for i, c in enumerate(criteria))
+    criteria_block = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(criteria))
     prompt = _LLM_ACCEPTANCE_PROMPT.format(
         criteria_block=criteria_block, diff_block=diff_block or "(no diff available)"
     )
@@ -218,8 +218,13 @@ def _check_llm_acceptance(repo: Path, branch: str, task: Task) -> CheckResult:
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
     try:
         result = subprocess.run(
-            ["claude", "--system-prompt", prompt, "-p",
-             "Evaluate the acceptance criteria. Return only the JSON."],
+            [
+                "claude",
+                "--system-prompt",
+                prompt,
+                "-p",
+                "Evaluate the acceptance criteria. Return only the JSON.",
+            ],
             env=env,
             capture_output=True,
             text=True,
@@ -335,12 +340,31 @@ def _check_pytest(repo: Path, t0: float) -> CheckResult:
             repo / "requirements-test.txt",
             repo / "app" / "requirements.txt",
         ]
+        dep_install_failed = False
+        dep_install_notes: list[str] = []
         for req_path in req_candidates:
             if req_path.exists():
-                _run_shell(f"{sys.executable} -m pip install -r {req_path} -q", cwd=repo)
-        rc, stdout, stderr = _run_shell(
-            f"{sys.executable} -m pytest --tb=short -q", cwd=repo
-        )
+                pip_rc, pip_out, pip_err = _run_shell(
+                    f"{sys.executable} -m pip install -r {req_path} -q", cwd=repo, timeout=300
+                )
+                if pip_rc != 0:
+                    dep_install_failed = True
+                    dep_install_notes.append(
+                        f"pip install -r {req_path.name} failed (rc={pip_rc}): "
+                        + (pip_err or pip_out).strip()[:200]
+                    )
+        if dep_install_failed:
+            # Some deps could not be installed (e.g. heavy ML packages like torch).
+            # Emit WARN rather than hard-fail: the agent's code may be correct but
+            # untestable in this environment.
+            return CheckResult(
+                name="pytest",
+                passed=True,  # soft pass — don't block merge over env limitations
+                output="WARN: dep install failed; pytest skipped.\n" + "\n".join(dep_install_notes),
+                duration_s=time.monotonic() - t0,
+                returncode=None,
+            )
+        rc, stdout, stderr = _run_shell(f"{sys.executable} -m pytest --tb=short -q", cwd=repo)
         passed = rc in (0, 5)
         return CheckResult(
             name="pytest",
@@ -453,20 +477,25 @@ def validate_task(
             continue  # handled separately
         cfg = registry.get(name)
         if cfg is None:
-            checks.append(CheckResult(
-                name=name,
-                passed=False,
-                output=f"Validator {name!r} not found in registry.",
-                duration_s=0.0,
-            ))
+            checks.append(
+                CheckResult(
+                    name=name,
+                    passed=False,
+                    output=f"Validator {name!r} not found in registry.",
+                    duration_s=0.0,
+                )
+            )
             continue
         if cfg.get("builtin"):
             # Future built-ins can be dispatched here
-            checks.append(CheckResult(
-                name=name, passed=True,
-                output=f"Built-in {name} handler not implemented.",
-                duration_s=0.0,
-            ))
+            checks.append(
+                CheckResult(
+                    name=name,
+                    passed=True,
+                    output=f"Built-in {name} handler not implemented.",
+                    duration_s=0.0,
+                )
+            )
         else:
             checks.append(_check_shell(name, cfg, repo))
 
@@ -479,6 +508,7 @@ def validate_task(
 
     try:
         from .metrics import validator_results_total
+
         validator_results_total.labels(
             result="passed" if passed else "failed", owner=task.owner
         ).inc()

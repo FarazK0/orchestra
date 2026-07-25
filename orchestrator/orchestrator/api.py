@@ -66,6 +66,7 @@ async def _lifespan(app: FastAPI):
     # Without this the first POST /tasks has to initialise the pool under request
     # timeout, which can fail when all services start simultaneously.
     from sqlalchemy import text as _text
+
     try:
         with _factory()() as _sess:
             _sess.execute(_text("SELECT 1"))
@@ -308,6 +309,7 @@ def create_task(body: TaskCreate, session: SessionDep) -> TaskSchema:
     # validators=[...] means the user made an explicit selection.
     if body.validators is None:
         from .validator import detect_validators, load_registry
+
         effective_validators = detect_validators(body.outputs, load_registry())
     else:
         effective_validators = body.validators
