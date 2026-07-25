@@ -343,13 +343,22 @@ def _check_pytest(repo: Path, t0: float) -> CheckResult:
             repo / "requirements-test.txt",
             repo / "app" / "requirements.txt",
         ]
+        uv_bin = shutil.which("uv") or "uv"
         primary_req_failed = False
         dep_install_notes: list[str] = []
         for req_path in req_candidates:
             if req_path.exists():
+                # Prefer uv (orchestrator venv may not have pip as a standalone module).
                 pip_rc, pip_out, pip_err = _run_shell(
-                    f"{sys.executable} -m pip install -r {req_path} -q", cwd=repo, timeout=300
+                    f"{uv_bin} pip install -r {req_path} -q --python {sys.executable}",
+                    cwd=repo,
+                    timeout=300,
                 )
+                if pip_rc != 0:
+                    # Fallback to sys.executable -m pip (standard venvs)
+                    pip_rc, pip_out, pip_err = _run_shell(
+                        f"{sys.executable} -m pip install -r {req_path} -q", cwd=repo, timeout=300
+                    )
                 if pip_rc != 0:
                     dep_install_notes.append(
                         f"pip install -r {req_path.name} failed (rc={pip_rc}): "
