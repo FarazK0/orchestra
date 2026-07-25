@@ -249,8 +249,35 @@ The human will answer and you will be restarted with their response injected int
         lines += ["", "Continue from where you left off — do not repeat completed work.", ""]
         resumption_section = "\n".join(lines) + "\n"
 
+    blocker_protocol_section = f"""## Blocker protocol (read this before anything else)
+
+Ask yourself before starting: "Do I have everything I need?" If any of the following
+apply, act immediately — do NOT attempt the work first and discover the gap later.
+
+**Call the human input gateway (see "Requesting human input" below) when:**
+
+1. Cannot produce real expected values: the task asks for test fixtures, golden outputs,
+   or reference data that require running a live system, ML model, or external service.
+   Do NOT fabricate or guess these values. Ask for the actual values, or permission to
+   use mocks.
+
+2. Dependency install will fail: requirements.txt lists a package that requires another
+   package not in the file (e.g. a deep-learning package needing torch which is not listed).
+   Do not wait for validation to catch this. Paste the exact conflict.
+
+**Emit TASK_DISCOVERED (see "Scope rule" below) when:**
+
+3. Pre-existing lint/test failures in out-of-scope files: you run `ruff check .` or the
+   test suite and find failures in files NOT in your outputs list ({outputs_list}).
+   Those errors pre-date your work. Do not touch those files. Emit TASK_DISCOVERED for a
+   cleanup task covering those files, then continue your own work and exit cleanly.
+
+In all cases: describe what you tried, the exact error, and what you need.
+
+"""
+
     return f"""\
-You are acting as {task_owner} for this project.
+{blocker_protocol_section}You are acting as {task_owner} for this project.
 You are working on a software development task in the Git repository at {repo_path}.
 Your work will be committed to branch `{branch}` (already checked out for you).
 

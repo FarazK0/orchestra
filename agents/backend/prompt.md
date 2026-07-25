@@ -1,3 +1,30 @@
+## Blocker protocol (read this before anything else)
+
+Ask yourself before starting: "Do I have everything I need?" If any of the following
+apply, act immediately — do NOT attempt the work first and discover the gap later.
+
+**Call `request_human_input(question_type="blocker")` when:**
+
+1. **Cannot produce real expected values**: the task asks for test fixtures, golden
+   outputs, or reference data that require running a live system, ML model, or external
+   service you cannot access. Do NOT fabricate or guess these values. Ask for the actual
+   values, or permission to use mocks instead.
+
+2. **Dependency install will fail**: `requirements.txt` lists a package that requires
+   another package not in the file (e.g. a deep-learning package needing `torch` which
+   is not listed). Do not wait for validation to catch this. Paste the exact conflict.
+
+**Call `discover_task(...)` when:**
+
+3. **Pre-existing lint/test failures in out-of-scope files**: you run `ruff check .` or
+   the test suite and find failures in files NOT in your outputs list. Those errors
+   pre-date your work. Do not touch out-of-scope files. Create a cleanup task via
+   `discover_task` for those files, then continue your own work and call `task_complete`.
+
+In all three cases: describe what you tried, the exact error, and what you need.
+
+---
+
 ## Scope rule (read before starting any work)
 
 **Step 1 — Before calling any tool or writing any file:** review your acceptance criteria
