@@ -24,8 +24,9 @@ These hold from the first commit. Never violate them, even for a "quick test":
    state must be reconstructable by replaying events.
 4. **Explicit state machine.** Task status changes only through defined transitions
    (created → assigned → running → completed → validated → merged → closed, plus
-   failed/escalated arms). Every transition writes an event and an audit row in one
-   DB transaction.
+   failed/escalated/awaiting_human arms). Every transition writes an event and an audit
+   row in one DB transaction. New validator-triggered paths: `completed → awaiting_human`
+   (env_limitation detected) and `failed → awaiting_human` (dispatcher failsafe).
 5. **Nothing merges to main of a managed project repo without the merge flow**
    (validator → review → merge via gateway). Tier rules come later; for now every merge
    is human-approved via `orchctl merge`.
