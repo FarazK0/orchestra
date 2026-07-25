@@ -37,5 +37,6 @@ exclude = ["sandbox/"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["orchestrator/tests", "gateway/tests", "agents/tests"]
+norecursedirs = ["sandbox", ".venv", "node_modules", "__pycache__", ".git"]
 pythonpath = ["."]
 addopts = "--import-mode=importlib"
