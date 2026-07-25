@@ -520,6 +520,63 @@ def test_normal_fail_retries_immediately(clean_db, redis_client, session_factory
     assert len(timer_calls) == 0, f"Expected no Timer for slow failure; got {timer_calls}"
 
 
+def test_on_task_failed_env_limitation_routes_to_awaiting_human(
+    clean_db, redis_client, session_factory, dispatcher
+):
+    """env_limitation in last audit row → awaiting_human instead of retry."""
+    from orchestrator.orchestrator.db import AuditRow, Event
+
+    task_id = _make_task(session_factory, "TASK-ENV01", "failed", budget_retries=2, retry_count=0)
+
+    # Inject an event + audit row that look like a validator result with env_limitation.
+    with session_factory() as s:
+        event_id = uuid.uuid4()
+        s.add(
+            Event(
+                event_id=event_id,
+                schema_version=1,
+                event_type="TASK_FAILED",
+                task_id=task_id,
+                emitted_by="validator",
+                emitted_at=datetime.now(timezone.utc),
+                payload={"from_status": "completed", "to_status": "failed"},
+            )
+        )
+        s.flush()
+        s.add(
+            AuditRow(
+                id=uuid.uuid4(),
+                timestamp=datetime.now(timezone.utc),
+                actor="validator",
+                action="transition:completed->failed",
+                task_id=task_id,
+                event_id=event_id,
+                details={
+                    "checks": [
+                        {
+                            "name": "pytest",
+                            "passed": False,
+                            "failure_category": "env_limitation",
+                            "output": "requirements.txt install failed",
+                        }
+                    ]
+                },
+            )
+        )
+        s.commit()
+
+    with patch("orchestrator.orchestrator.dispatcher.subprocess.Popen") as mock_popen:
+        with session_factory() as session:
+            dispatcher._on_task_failed(task_id, session)
+
+    mock_popen.assert_not_called()
+    with session_factory() as s:
+        task = s.get(Task, task_id)
+        assert task.status == "awaiting_human"
+        assert task.checkpoint is not None
+        assert task.checkpoint["question_type"] == "blocker"
+
+
 # ---------------------------------------------------------------------------
 # _on_task_discovered — replan triggering
 # ---------------------------------------------------------------------------

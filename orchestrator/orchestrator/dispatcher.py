@@ -233,6 +233,40 @@ class Dispatcher:
         task = session.get(Task, task_id)
         if task is None or task.status != "failed":
             return  # stale event
+
+        # If the last validation result contains an env_limitation failure, route to
+        # awaiting_human instead of retrying — retries cannot fix a missing dependency.
+        last_audit = session.execute(
+            select(AuditRow)
+            .where(AuditRow.task_id == task_id)
+            .order_by(AuditRow.timestamp.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if last_audit:
+            audit_checks = (last_audit.details or {}).get("checks", [])
+            if any(
+                c.get("failure_category") == "env_limitation"
+                for c in audit_checks
+                if not c.get("passed")
+            ):
+                task.checkpoint = {
+                    "type": "awaiting_human",
+                    "question": "Task failed due to environment limitation (dependency install). "
+                                "See last validation result for details. "
+                                "Fix requirements.txt and respond to re-run.",
+                    "question_type": "blocker",
+                    "human_response": None,
+                }
+                transition(
+                    session,
+                    task_id,
+                    "awaiting_human",
+                    actor="dispatcher",
+                    payload={"blocker_category": "env_limitation"},
+                )
+                session.commit()
+                return
+
         budget_retries: int = task.budget.get("retries", 0)
         if task.retry_count < budget_retries:
             # Determine how long the last run took.
