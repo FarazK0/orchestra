@@ -54,6 +54,11 @@ def _read_file(path: Path) -> str | None:
         return path.read_text(encoding="utf-8")
     except (FileNotFoundError, PermissionError, IsADirectoryError):
         return None
+    except (UnicodeDecodeError, ValueError):
+        # Binary file — return a placeholder so the agent knows the file exists
+        # but cannot be included as text in the context package.
+        size = path.stat().st_size if path.exists() else 0
+        return f"[binary file, {size} bytes, not included in context]"
 
 
 def build_context_package(

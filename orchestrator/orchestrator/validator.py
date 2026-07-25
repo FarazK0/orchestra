@@ -401,7 +401,7 @@ def _check_ruff(repo: Path, branch: str, t0: float) -> CheckResult:
     of terminal settings (the default rich format uses multi-line blocks with "help:"
     lines that are unsafe to parse for file names).
     """
-    rc, stdout, stderr = _run_shell("ruff check . --output-format=concise", cwd=repo)
+    rc, stdout, stderr = _run_shell("ruff check . --output-format=concise --color never", cwd=repo)
     out = (stdout + stderr).strip()[:800]
     if rc == 0:
         return CheckResult(name="ruff", passed=True, output=out,
