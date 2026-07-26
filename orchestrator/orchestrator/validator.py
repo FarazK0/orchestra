@@ -12,12 +12,12 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
-import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -169,6 +169,11 @@ You are a QA validator evaluating whether an AI agent's output meets the task ac
 ## Task acceptance criteria
 {criteria_block}
 
+## Existing files in the repository (main branch, before the agent's changes)
+These files already existed before the diff below was applied. Use this list to
+avoid incorrectly concluding that an imported module or referenced file is missing.
+{repo_files_block}
+
 ## Agent outputs (git diff from main branch)
 {diff_block}
 
@@ -213,9 +218,19 @@ def _check_llm_acceptance(repo: Path, branch: str, task: Task) -> CheckResult:
         _, diff, _ = _git(repo, "diff", f"{branch}^", branch, "--unified=3")
     diff_block = (diff[:6000] + "\n...(truncated)") if len(diff) > 6000 else diff
 
+    # Enumerate files that already exist on main so the LLM can distinguish
+    # "missing file" from "file already in repo, not shown in diff".
+    _, ls_out, _ = _git(repo, "ls-files", "--with-tree=main")
+    repo_files_lines = sorted(ls_out.strip().splitlines()) if ls_out else []
+    if len(repo_files_lines) > 120:
+        repo_files_lines = repo_files_lines[:120] + [f"...({len(repo_files_lines) - 120} more files)"]
+    repo_files_block = "\n".join(repo_files_lines) if repo_files_lines else "(could not list files)"
+
     criteria_block = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(criteria))
     prompt = _LLM_ACCEPTANCE_PROMPT.format(
-        criteria_block=criteria_block, diff_block=diff_block or "(no diff available)"
+        criteria_block=criteria_block,
+        diff_block=diff_block or "(no diff available)",
+        repo_files_block=repo_files_block,
     )
 
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
@@ -312,6 +327,62 @@ def _check_shell(name: str, cfg: dict, repo: Path, branch: str = "") -> CheckRes
     )
 
 
+_VENV_CACHE_ROOT = Path("/tmp/orchestra/validation-venvs")
+
+
+def _ensure_validation_venv(
+    repo: Path, req_paths: list[Path]
+) -> tuple[str, list[str], bool]:
+    """Return (venv_python_path, notes, install_ok).
+
+    Creates (or reuses) a cached venv keyed by the combined hash of all present
+    requirements files.  Uses the system python3 so pip is always available,
+    which supports requirements formats (e.g. per-package --index-url) that
+    uv pip does not handle.
+    """
+    # Hash the content of all requirements files to form a cache key.
+    h = hashlib.sha256()
+    for p in sorted(req_paths):
+        h.update(p.name.encode())
+        h.update(p.read_bytes())
+    cache_key = h.hexdigest()[:16]
+    venv_dir = _VENV_CACHE_ROOT / f"{repo.name}-{cache_key}"
+    venv_python = str(venv_dir / "bin" / "python3")
+    stamp = venv_dir / ".install-ok"
+    notes: list[str] = []
+
+    if stamp.exists():
+        return venv_python, notes, True
+
+    # Create fresh venv using system python3 (always has pip).
+    system_python = shutil.which("python3") or "python3"
+    _VENV_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    rc, out, err = _run_shell(f"{system_python} -m venv {venv_dir}", cwd=repo, timeout=60)
+    if rc != 0:
+        notes.append(f"venv creation failed: {(err or out).strip()[:200]}")
+        return venv_python, notes, False
+
+    pip_bin = str(venv_dir / "bin" / "pip")
+    # Always install pytest so the venv can run tests.
+    _run_shell(f"{pip_bin} install pytest -q", cwd=repo, timeout=120)
+
+    primary_failed = False
+    for req_path in req_paths:
+        rc, out, err = _run_shell(
+            f"{pip_bin} install -r {req_path} -q", cwd=repo, timeout=600
+        )
+        if rc != 0:
+            msg = f"pip install -r {req_path.name} failed: {(err or out).strip()[:200]}"
+            notes.append(msg)
+            if req_path.name == "requirements.txt":
+                primary_failed = True
+
+    if not primary_failed:
+        stamp.touch()
+
+    return venv_python, notes, not primary_failed
+
+
 def _check_pytest(repo: Path, t0: float) -> CheckResult:
     """Pytest with subdirectory-aware uv run."""
     subdirs = [d for d in sorted(repo.iterdir()) if d.is_dir() and (d / "pyproject.toml").exists()]
@@ -336,52 +407,38 @@ def _check_pytest(repo: Path, t0: float) -> CheckResult:
             returncode=overall_rc,
         )
     else:
-        # Install requirements files before pytest for non-pyproject repos.
+        # Non-pyproject repos: create an isolated venv (cached by requirements hash)
+        # so dependencies are installed with pip, which handles all requirements formats
+        # including per-package --index-url options that uv pip does not support.
         req_candidates = [
             repo / "requirements.txt",
             repo / "requirements-dev.txt",
             repo / "requirements-test.txt",
             repo / "app" / "requirements.txt",
         ]
-        uv_bin = shutil.which("uv") or "uv"
-        primary_req_failed = False
-        dep_install_notes: list[str] = []
-        for req_path in req_candidates:
-            if req_path.exists():
-                # Prefer uv (orchestrator venv may not have pip as a standalone module).
-                pip_rc, pip_out, pip_err = _run_shell(
-                    f"{uv_bin} pip install -r {req_path} -q --python {sys.executable}",
-                    cwd=repo,
-                    timeout=300,
-                )
-                if pip_rc != 0:
-                    # Fallback to sys.executable -m pip (standard venvs)
-                    pip_rc, pip_out, pip_err = _run_shell(
-                        f"{sys.executable} -m pip install -r {req_path} -q", cwd=repo, timeout=300
-                    )
-                if pip_rc != 0:
-                    dep_install_notes.append(
-                        f"pip install -r {req_path.name} failed (rc={pip_rc}): "
-                        + (pip_err or pip_out).strip()[:200]
-                    )
-                    if req_path.name == "requirements.txt":
-                        primary_req_failed = True
-        if primary_req_failed:
+        present_reqs = [p for p in req_candidates if p.exists()]
+
+        venv_python, install_notes, install_ok = _ensure_validation_venv(repo, present_reqs)
+        if not install_ok:
+            # Installation of requirements.txt failed — treat as env_limitation.
             return CheckResult(
                 name="pytest",
                 passed=False,
-                output="requirements.txt install failed; cannot run pytest.\n"
-                + "\n".join(dep_install_notes),
+                output="requirements install failed; cannot run pytest.\n" + "\n".join(install_notes),
                 duration_s=time.monotonic() - t0,
                 returncode=None,
                 failure_category="env_limitation",
             )
-        rc, stdout, stderr = _run_shell(f"{sys.executable} -m pytest --tb=short -q", cwd=repo)
+
+        rc, stdout, stderr = _run_shell(f"{venv_python} -m pytest --tb=short -q", cwd=repo)
         passed = rc in (0, 5)
+        out = (stdout + stderr).strip()[:800]
+        if install_notes:
+            out = "\n".join(install_notes) + "\n" + out
         return CheckResult(
             name="pytest",
             passed=passed,
-            output=(stdout + stderr).strip()[:800],
+            output=out,
             duration_s=time.monotonic() - t0,
             returncode=rc,
         )

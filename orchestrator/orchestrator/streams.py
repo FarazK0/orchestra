@@ -139,6 +139,11 @@ class StreamConsumer:
                 count=10,
                 block=block_ms,
             )
+        except redis.exceptions.TimeoutError:
+            # WSL2 / some Redis setups raise TimeoutError on the blocking read
+            # when the socket idle-times out before block_ms expires. Treat as
+            # empty — the next iteration will retry.
+            return False
         except redis.exceptions.ResponseError as exc:
             if "NOGROUP" not in str(exc):
                 raise
