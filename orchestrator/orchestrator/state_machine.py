@@ -34,6 +34,7 @@ TRANSITIONS: dict[tuple[str, str], str] = {
     ("failed", "running"): "TASK_RETRIED",
     ("failed", "escalated"): "TASK_ESCALATED",
     ("escalated", "running"): "TASK_RESET",
+    ("escalated", "assigned"): "TASK_ASSIGNED",  # human un-escalation back to queue
     ("escalated", "completed"): "TASK_RECOVER",
     # v0.3 adaptive lifecycle: parent suspends while child work runs, then resumes
     ("running", "blocked"): "TASK_BLOCKED",

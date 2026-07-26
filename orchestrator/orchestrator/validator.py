@@ -302,13 +302,15 @@ def _check_llm_acceptance(repo: Path, branch: str, task: Task) -> CheckResult:
 # ---------------------------------------------------------------------------
 
 
-def _check_shell(name: str, cfg: dict, repo: Path, branch: str = "") -> CheckResult:
+def _check_shell(
+    name: str, cfg: dict, repo: Path, branch: str = "", main_repo: Path | None = None
+) -> CheckResult:
     """Run a shell-command validator."""
     t0 = time.monotonic()
     cmd: str = cfg["command"]
 
     if name == "pytest":
-        return _check_pytest(repo, t0)
+        return _check_pytest(repo, t0, main_repo=main_repo)
 
     if name == "ruff":
         return _check_ruff(repo, branch, t0)
@@ -355,9 +357,13 @@ def _ensure_validation_venv(
         return venv_python, notes, True
 
     # Create fresh venv using system python3 (always has pip).
+    # --system-site-packages inherits large native packages (torch, numpy, etc.)
+    # already installed on the host, avoiding slow CDN downloads for those.
     system_python = shutil.which("python3") or "python3"
     _VENV_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
-    rc, out, err = _run_shell(f"{system_python} -m venv {venv_dir}", cwd=repo, timeout=60)
+    rc, out, err = _run_shell(
+        f"{system_python} -m venv --system-site-packages {venv_dir}", cwd=repo, timeout=60
+    )
     if rc != 0:
         notes.append(f"venv creation failed: {(err or out).strip()[:200]}")
         return venv_python, notes, False
@@ -366,24 +372,23 @@ def _ensure_validation_venv(
     # Always install pytest so the venv can run tests.
     _run_shell(f"{pip_bin} install pytest -q", cwd=repo, timeout=120)
 
-    primary_failed = False
+    any_failed = False
     for req_path in req_paths:
         rc, out, err = _run_shell(
-            f"{pip_bin} install -r {req_path} -q", cwd=repo, timeout=600
+            f"{pip_bin} install -r {req_path} -q", cwd=repo, timeout=900
         )
         if rc != 0:
             msg = f"pip install -r {req_path.name} failed: {(err or out).strip()[:200]}"
             notes.append(msg)
-            if req_path.name == "requirements.txt":
-                primary_failed = True
+            any_failed = True
 
-    if not primary_failed:
+    if not any_failed:
         stamp.touch()
 
-    return venv_python, notes, not primary_failed
+    return venv_python, notes, not any_failed
 
 
-def _check_pytest(repo: Path, t0: float) -> CheckResult:
+def _check_pytest(repo: Path, t0: float, main_repo: Path | None = None) -> CheckResult:
     """Pytest with subdirectory-aware uv run."""
     subdirs = [d for d in sorted(repo.iterdir()) if d.is_dir() and (d / "pyproject.toml").exists()]
     uv = shutil.which("uv") or "uv"
@@ -416,6 +421,17 @@ def _check_pytest(repo: Path, t0: float) -> CheckResult:
             repo / "requirements-test.txt",
             repo / "app" / "requirements.txt",
         ]
+        # Also pull dev/test requirements from main in the primary repo — a task's
+        # worktree branches from main at dispatch time and may be missing dev
+        # requirements added later by sibling tasks (e.g. requirements-dev.txt
+        # committed by TASK-003 while TASK-002's worktree was already created).
+        if main_repo is not None and main_repo != repo:
+            for name in ("requirements-dev.txt", "requirements-test.txt"):
+                main_req = main_repo / name
+                worktree_req = repo / name
+                # Add main's copy when the worktree doesn't have its own.
+                if main_req.exists() and not worktree_req.exists():
+                    req_candidates.append(main_req)
         present_reqs = [p for p in req_candidates if p.exists()]
 
         venv_python, install_notes, install_ok = _ensure_validation_venv(repo, present_reqs)
@@ -429,6 +445,23 @@ def _check_pytest(repo: Path, t0: float) -> CheckResult:
                 returncode=None,
                 failure_category="env_limitation",
             )
+
+        # Symlink top-level entries from main_repo that are absent in the worktree
+        # and not tracked by git (e.g. gitignored artifacts, untracked data dirs).
+        # This makes binary model files, fixtures, etc. available to tests without
+        # committing them to the agent's branch.
+        if main_repo is not None and main_repo != repo:
+            _, tracked_out, _ = _git(repo, "ls-files")
+            tracked_prefixes = set()
+            for f in (tracked_out or "").strip().splitlines():
+                tracked_prefixes.add(f.split("/")[0])
+            _SKIP = {".git", "__pycache__", ".venv", ".mypy_cache", ".ruff_cache"}
+            for src in main_repo.iterdir():
+                if src.name.startswith(".") or src.name.startswith("=") or src.name in _SKIP:
+                    continue
+                dst = repo / src.name
+                if not dst.exists() and src.name not in tracked_prefixes:
+                    dst.symlink_to(src)
 
         rc, stdout, stderr = _run_shell(f"{venv_python} -m pytest --tb=short -q", cwd=repo)
         passed = rc in (0, 5)
@@ -618,7 +651,7 @@ def validate_task(
                 )
             )
         else:
-            checks.append(_check_shell(name, cfg, repo, branch=branch))
+            checks.append(_check_shell(name, cfg, repo, branch=branch, main_repo=Path(repo_path).resolve()))
 
     # Always-on: llm-acceptance (runs only when task has acceptance criteria)
     checks.append(_check_llm_acceptance(repo, branch, task))

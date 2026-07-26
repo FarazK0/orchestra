@@ -595,7 +595,7 @@ def validate(
     On pass:  task transitions to 'validated'.
     On fail:  task transitions to 'failed'.
     """
-    with _client(timeout=120.0) as c:
+    with _client(timeout=1200.0) as c:
         resp = c.post(
             f"/tasks/{task_id}/validate",
             json={"repo_path": repo, "actor": actor},
