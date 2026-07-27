@@ -34,6 +34,18 @@ log = logging.getLogger(__name__)
 app = typer.Typer(name="claude-code-agent", add_completion=False)
 
 
+_ENV_LIMIT_PATTERNS: list[str] = [
+    "session limit",
+    "you've hit your",
+    "rate limit",
+    "rate_limit",
+    "authentication failed",
+    "invalid api key",
+    "unauthenticated",
+    "unauthorized",
+    "payment required",
+]
+
 _VALIDATOR_RULES: dict[str, str] = {
     "ruff": "- ruff: run `ruff check .` and fix all errors before finishing",
     "pytest": "- pytest: run `pytest --tb=short -q` and fix all failures before finishing",
@@ -545,6 +557,7 @@ def main(
             hb_stop.set()
             _stderr = (result.stderr or "").strip()
             _stdout = (result.stdout or "").strip()
+            _combined_lower = (_stderr + " " + _stdout).lower()
             _hint = (_stderr or _stdout)[:300]
             log.error(
                 "claude CLI exited %d:\nstderr: %s\nstdout: %s",
@@ -552,6 +565,30 @@ def main(
                 result.stderr[:2000],
                 result.stdout[:500],
             )
+            if any(p in _combined_lower for p in _ENV_LIMIT_PATTERNS):
+                log.warning(
+                    "env_limitation detected in CLI output; escalating task %s to awaiting_human",
+                    task_id,
+                )
+                try:
+                    http.post(
+                        f"{gw_url}/human_input/request",
+                        json={
+                            "agent_id": task_owner,
+                            "task_id": task_id,
+                            "question_type": "env_limitation",
+                            "question": (
+                                f"Claude CLI exited {result.returncode} with an environment "
+                                "limitation (session limit, rate limit, or auth failure). "
+                                "Resolve the issue and respond to re-run."
+                            ),
+                            "details": {"raw": (_stderr or _stdout)[:500]},
+                        },
+                        headers=_auth_hdrs,
+                    )
+                except Exception as exc:
+                    log.warning("Could not post env_limitation to human_input/request: %s", exc)
+                raise typer.Exit(0)
             _mark_suspended(
                 http,
                 gw_url,
@@ -677,41 +714,67 @@ def main(
                 out_of_scope[:10],
             )
 
+        used_prior_commits = False
         if not changed_paths:
-            hb_stop.set()
-            log.warning("claude exited 0 but no files changed; marking task failed")
-            _mark_failed(http, orch_url, task_id, "no_files_changed")
-            raise typer.Exit(1)
+            _prior = subprocess.run(
+                ["git", "rev-list", "main..HEAD", "--count"],
+                capture_output=True, text=True, cwd=repo_path,
+            )
+            prior_count = int((_prior.stdout or "0").strip() or "0")
+            if prior_count > 0:
+                log.info(
+                    "No new changes but branch has %d prior commit(s); treating as completed",
+                    prior_count,
+                )
+                _prior_diff = subprocess.run(
+                    ["git", "diff", "--name-only", "main..HEAD"],
+                    capture_output=True, text=True, cwd=repo_path,
+                )
+                changed_paths = [p.strip() for p in _prior_diff.stdout.splitlines() if p.strip()]
+                used_prior_commits = True
+            else:
+                hb_stop.set()
+                log.warning("claude exited 0 but no files changed; marking task failed")
+                _mark_failed(http, orch_url, task_id, "no_files_changed")
+                raise typer.Exit(1)
 
         log.info("Changed files: %s", changed_paths)
 
-        # ── 4. Commit via gateway ─────────────────────────────────────────
-        try:
-            resp = _call(
-                http,
-                "POST",
-                f"{gw_url}/git/commit",
-                json={
-                    "agent_id": task_owner,
-                    "task_id": task_id,
-                    "repo_path": repo_path,
-                    "message": f"{commit_prefix} {task_owner} output",
-                    "paths": changed_paths,
-                },
-                headers=_auth_hdrs,
+        # ── 4. Commit via gateway (or use prior HEAD sha) ─────────────────
+        if used_prior_commits:
+            _head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, cwd=repo_path,
             )
-            sha = resp.get("sha", "?")
-            log.info("Committed: sha=%s", sha)
-        except httpx.HTTPStatusError as exc:
-            hb_stop.set()
-            log.error("Commit failed: %s", exc.response.text)
-            _mark_failed(
-                http,
-                orch_url,
-                task_id,
-                f"gateway:git_commit:{exc.response.status_code}:{exc.response.text[:300]}",
-            )
-            raise typer.Exit(1)
+            sha = _head.stdout.strip() or "?"
+            log.info("Using prior commit sha=%s", sha)
+        else:
+            try:
+                resp = _call(
+                    http,
+                    "POST",
+                    f"{gw_url}/git/commit",
+                    json={
+                        "agent_id": task_owner,
+                        "task_id": task_id,
+                        "repo_path": repo_path,
+                        "message": f"{commit_prefix} {task_owner} output",
+                        "paths": changed_paths,
+                    },
+                    headers=_auth_hdrs,
+                )
+                sha = resp.get("sha", "?")
+                log.info("Committed: sha=%s", sha)
+            except httpx.HTTPStatusError as exc:
+                hb_stop.set()
+                log.error("Commit failed: %s", exc.response.text)
+                _mark_failed(
+                    http,
+                    orch_url,
+                    task_id,
+                    f"gateway:git_commit:{exc.response.status_code}:{exc.response.text[:300]}",
+                )
+                raise typer.Exit(1)
 
         # ── 4.5. Audit per-file writes (non-fatal) ────────────────────────
         # The claude CLI writes files directly without going through the gateway,

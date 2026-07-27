@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from .db import Task
 
-TERMINAL_STATUSES: frozenset[str] = frozenset({"completed", "validated", "merged", "closed"})
+TERMINAL_STATUSES: frozenset[str] = frozenset({"merged", "closed"})
 
 
 def task_is_ready(task: Task, session: Session) -> bool:

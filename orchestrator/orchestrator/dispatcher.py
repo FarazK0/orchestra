@@ -546,7 +546,29 @@ class Dispatcher:
 
         child = self._scheduler.handle_task_discovered(session, discovery_event)
         if child is None:
-            session.commit()  # persist any rejection events
+            # Fail the parent so it doesn't stay orphaned at 'running'.
+            parent = session.get(Task, task_id)
+            if parent is not None and parent.status == "running":
+                log.warning(
+                    "TASK_DISCOVERED rejected for parent %s; transitioning to failed",
+                    task_id,
+                )
+                fail_event = transition(
+                    session,
+                    task_id,
+                    "failed",
+                    actor="dispatcher",
+                    details={"failure_reason": "task_discovery_rejected"},
+                )
+                session.commit()
+                self._publisher.publish(
+                    str(fail_event.event_id),
+                    "TASK_FAILED",
+                    task_id,
+                    {"failure_reason": "task_discovery_rejected"},
+                )
+            else:
+                session.commit()  # persist any rejection events
             return
 
         # Capture deps before commit so we don't need a lazy reload after expire.

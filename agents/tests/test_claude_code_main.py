@@ -251,10 +251,10 @@ def test_stdout_included_in_failure_reason(tmp_path):
         patch("subprocess.check_output", return_value=""),
         patch("httpx.Client", return_value=mock_http),
     ):
-        # Empty stderr, non-empty stdout (typical for API rate-limit messages on the claude CLI)
+        # Empty stderr, non-empty stdout — use a generic task error (not an env_limitation).
         mock_run.return_value = MagicMock(
             returncode=1,
-            stdout="API rate limit exceeded: retry after 60s",
+            stdout="Task failed: unexpected KeyError in step 3",
             stderr="",
         )
 
@@ -270,7 +270,58 @@ def test_stdout_included_in_failure_reason(tmp_path):
     transition_calls = [c for c in post_calls if "/transition" in c["url"]]
     assert len(transition_calls) == 1, f"Expected 1 transition call, got: {post_calls}"
     reason = transition_calls[0]["json"]["details"]["failure_reason"]
-    assert "API rate limit exceeded" in reason, f"stdout not in reason: {reason!r}"
+    assert "KeyError" in reason, f"stdout not in reason: {reason!r}"
+
+
+def test_env_limitation_routes_to_awaiting_human(tmp_path):
+    """When claude CLI exits non-zero with a session/rate-limit message, the task should
+    route to awaiting_human (exit 0) not fail/suspend."""
+    ctx = _make_context(tmp_path)
+
+    post_calls: list = []
+
+    def _fake_post(url, **kwargs):
+        post_calls.append({"url": url, "json": kwargs.get("json", {})})
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        return mock_resp
+
+    mock_http = MagicMock()
+    mock_http.__enter__ = MagicMock(return_value=mock_http)
+    mock_http.__exit__ = MagicMock(return_value=False)
+    mock_http.request.side_effect = lambda method, url, **kw: (lambda r: r)(
+        MagicMock(raise_for_status=MagicMock(), json=MagicMock(return_value={}))
+    )
+    mock_http.post.side_effect = _fake_post
+
+    with (
+        patch("subprocess.run") as mock_run,
+        patch("subprocess.check_output", return_value=""),
+        patch("httpx.Client", return_value=mock_http),
+    ):
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="You've hit your session limit. Please try again later.",
+            stderr="",
+        )
+
+        from typer.testing import CliRunner
+
+        from agents.claude_code.main import app
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["--context", ctx, "--run-id", "run-env-limit"])
+
+    # env_limitation exits cleanly (exit 0) after posting to human_input/request
+    assert result.exit_code == 0
+
+    human_input_calls = [c for c in post_calls if "human_input/request" in c["url"]]
+    assert len(human_input_calls) == 1
+    assert human_input_calls[0]["json"]["question_type"] == "env_limitation"
+
+    # Must NOT have posted a /transition to failed or suspended
+    transition_calls = [c for c in post_calls if "/transition" in c["url"]]
+    assert len(transition_calls) == 0, f"Should not transition on env_limitation: {transition_calls}"
 
 
 def test_audit_emit_failure_is_non_fatal(tmp_path):

@@ -110,77 +110,58 @@ session-limit failure mode requires a simple re-queue.
 
 ---
 
-## Not yet fixed
+## Fixed in second session (2026-07-27)
 
 ### 4. Agent-launch env_limitation not routed to `awaiting_human`
 
-**File:** `agents/claude_code/main.py` (failure branch, ~line 550)  
-**Symptom:** When the Claude CLI exits with code 1 and stdout contains
-`"You've hit your session limit"`, the claude_code agent falls through to the generic
-failure path: `running → failed`. After three retries the task escalates. This is wrong:
-a session-limit error is an `env_limitation` (external resource unavailable), not a task
-defect. It should route to `awaiting_human` exactly like the validator's env_limitation
-path does for install failures.  
-**Proposed fix:** In the claude_code agent's error handler, after a non-zero exit, parse
-the combined stdout/stderr for patterns indicating environment problems (session limit,
-rate limit, authentication failure). On match, call the `human_input/request` endpoint
-with `question_type: "env_limitation"` and the raw error text, then exit 0. The task
-transitions `running → awaiting_human` instead of `running → failed`. Human resumes
-via `orchctl respond` once the limit resets.  
-**Workaround used:** Manually transitioned `escalated → assigned` after limit reset.
+**File:** `agents/claude_code/main.py`  
+**Fix:** Added `_ENV_LIMIT_PATTERNS` module-level list. In the `returncode != 0` branch,
+before calling `_mark_suspended`, combined stdout+stderr is matched against these patterns.
+On match, POST to `{gw_url}/human_input/request` with `question_type: "env_limitation"` and
+exit 0. Task transitions `running → awaiting_human` via the gateway. No retry budget is
+consumed.
 
 ---
 
 ### 5. Dependent tasks start from `main`, not from their dependency's branch
 
-**Files:** Dispatcher / agent runner (branch creation logic)  
-**Symptom:** TASK-003 (`server.py`) and TASK-002 (`golden fixtures`) both depended on
-TASK-001 (`local storage backend`). The dependency check only verifies task *status*
-(`completed` or later). Worktrees are always created from `HEAD` of `main`. Since
-TASK-001 was `completed` but not yet *merged to main*, TASK-002 and TASK-003 ran on
-the old codebase without the local storage backend. TASK-003 re-implemented `store.py`
-from scratch (wrong file, wrong task) before hitting the session limit.  
-**Proposed fix (option A):** Block dependent tasks from dispatching until all `depends_on`
-tasks are `merged` (not just `completed`). Adjust `get_ready_successors` in `dag.py`
-to require `merged` or `closed` status.  
-**Proposed fix (option B):** When creating a worktree for a task with `depends_on`, merge
-the upstream agent branches into the worktree before handing it to the agent. More complex
-but allows true parallel pipelines.  
-**Workaround used:** Merged TASK-001 before re-queuing TASK-002 and TASK-003.
+**File:** `orchestrator/orchestrator/dag.py`  
+**Fix:** Removed `"completed"` and `"validated"` from `TERMINAL_STATUSES`. Only `"merged"`
+and `"closed"` now allow successors to dispatch. Updated all existing tests in `test_dag.py`
+and `test_dispatcher.py` to use `"merged"` for dependency tasks, and added three new
+regression tests asserting the old (incorrect) behaviour no longer holds.
 
 ---
 
 ### 6. TASK_DISCOVERED with empty payload leaves parent stuck at `running`
 
-**File:** `orchestrator/orchestrator/scheduler.py:54` (`handle_task_discovered`)  
-**Symptom:** TASK-001's agent emitted `TASK_DISCOVERED` with payload `{}`. The scheduler
-returned `None` (no child task created, no transition on the parent). The agent process
-had already exited (exit 0). TASK-001 was left at `running` with no active agent and no
-dispatcher event to advance it.  
-**What should happen:** If `handle_task_discovered` returns `None` because the payload is
-malformed (no title, no outputs), the dispatcher should either (a) log a warning and
-transition the parent to `failed` so the retry logic kicks in, or (b) emit an audit event
-and revert the parent to `assigned` for a clean restart.  
-**Proposed fix:** In `dispatcher._on_task_discovered`, if `child is None`, transition the
-parent task from `running` to `failed` with `failure_reason="task_discovery_rejected"` so
-the existing retry/escalation path handles it rather than leaving the task orphaned.  
-**Workaround used:** Manually transitioned TASK-001 `running → completed` via the API,
-with a note explaining that the implementation was complete and the TASK_DISCOVERED was
-erroneous.
+**File:** `orchestrator/orchestrator/dispatcher.py` (`_on_task_discovered`)  
+**Fix:** After `child = self._scheduler.handle_task_discovered(...)`, if `child is None`
+and the parent task is still `running`, transitions parent to `failed` with
+`failure_reason="task_discovery_rejected"` and publishes `TASK_FAILED` to Redis so the
+existing retry/escalation path kicks in. Test added in `test_dispatcher.py`.
 
 ---
 
-### 7. Root agent `too_many_outputs` threshold blocks tasks with many fixtures
+### 7. Root agent auto-splits oversized tasks instead of blocking for human review
 
-**File:** `agents/root/main.py` (oversized check, `len(outputs) > 2`)  
-**Symptom:** TASK-002 has 12 output files (5 `.npy` input tensors, 5 `.json` golden
-fixtures, `tests/test_golden.py`, `tests/__init__.py`). The root agent's guard
-`too_many_outputs = len(outputs) > 2` held the entire plan in `created` state waiting for
-human review before any task could be assigned. This is correct behaviour in principle
-(large fan-out warrants human review) but the threshold of 2 is far too low for
-fixture-generating tasks.  
-**Proposed fix:** Raise the threshold (e.g. `> 10`) or make it configurable via an
-environment variable (`ORCHESTRA_MAX_OUTPUTS_BEFORE_REVIEW`). Alternatively, exclude
-test fixtures (paths under `tests/fixtures/`) from the output count since they are
-generated data, not production code changes.  
-**Workaround used:** Manually approved all three tasks with `orchctl approve`.
+**Files:** `agents/root/main.py`  
+**Fix:** Replaced the `too_many_outputs` human-approval gate with recursive binary
+auto-split. New helpers `_split_task` and `_expand_plan` use the LLM to split any task
+with `> _MAX_OUTPUTS` outputs into exactly two semantically coherent sub-tasks, setting
+`depends_on` between them if the LLM determines one group needs the other's outputs.
+Recursion depth capped at 4. `_MAX_OUTPUTS` defaults to 5, overridable via
+`ORCHESTRA_MAX_OUTPUTS_BEFORE_REVIEW` env var. The acceptance-criteria gate (`> 15`)
+and broad-directory gate are retained as human-approval triggers. Documented in
+`.env.example`.
+
+---
+
+### 8. `no_files_changed` false positive when prior run already committed the work
+
+**File:** `agents/claude_code/main.py`  
+**Fix:** Before marking `failed: no_files_changed`, runs `git rev-list main..HEAD --count`.
+If prior commits exist on the agent branch, collects `changed_paths` from
+`git diff --name-only main..HEAD`, skips the gateway commit call, reads `sha` from
+`git rev-parse HEAD`, then proceeds through the normal audit-emit and completed-transition
+path. Only marks failed if there are truly zero agent commits AND no current changes.

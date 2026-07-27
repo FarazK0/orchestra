@@ -187,8 +187,8 @@ def test_concurrency_guard_skips_conflicting_task(
 def test_on_task_completed_auto_assigns_successor(
     clean_db, redis_client, session_factory, dispatcher
 ):
-    """Completing task A should auto-transition task B (depends on A) to assigned."""
-    a_id = _make_task(session_factory, "TASK-DIS20", "completed")
+    """Merging task A should auto-transition task B (depends on A) to assigned."""
+    a_id = _make_task(session_factory, "TASK-DIS20", "merged")
     now = datetime.now(timezone.utc)
     with session_factory() as s:
         b = Task(
@@ -223,8 +223,8 @@ def test_on_task_completed_auto_assigns_successor(
 
 
 def test_multi_successor_fan_out_both_assigned(clean_db, redis_client, session_factory, dispatcher):
-    """Completing backend task should auto-assign both frontend and QA successors."""
-    backend_id = _make_task(session_factory, "TASK-FAN01", "completed")
+    """Merging backend task should auto-assign both frontend and QA successors."""
+    backend_id = _make_task(session_factory, "TASK-FAN01", "merged")
     frontend_id = _make_task(session_factory, "TASK-FAN02", "created")
     qa_id = _make_task(session_factory, "TASK-FAN03", "created")
 
@@ -254,7 +254,7 @@ def test_fan_out_conflict_serializes_one_successor(
     clean_db, redis_client, session_factory, dispatcher
 ):
     """When fan-out successors have overlapping outputs, only one launches at a time."""
-    backend_id = _make_task(session_factory, "TASK-FAN10", "completed")
+    backend_id = _make_task(session_factory, "TASK-FAN10", "merged")
     fe_id = _make_task(session_factory, "TASK-FAN11", "created", outputs=["src/shared/"])
     qa_id = _make_task(session_factory, "TASK-FAN12", "created", outputs=["src/shared/util.py"])
 
@@ -690,6 +690,55 @@ def test_on_task_discovered_no_replan_when_child_has_no_deps(
     root_messages = dispatcher._publisher._r.xrange(ROOT_STREAM_KEY)
     replan_msgs = [m for _, m in root_messages if m.get("event_type") == "PLAN_REPLAN_REQUESTED"]
     assert len(replan_msgs) == 0
+
+
+def test_on_task_discovered_rejected_payload_fails_parent(
+    clean_db, redis_client, session_factory, dispatcher
+):
+    """When handle_task_discovered returns None (e.g. spawn depth exceeded), the running
+    parent should transition to 'failed' rather than stay orphaned at 'running'."""
+    import uuid as _uuid
+    from datetime import datetime, timezone
+
+    parent_id = "TASK-DO1"
+    # spawn_depth=5 >= MAX_SPAWN_DEPTH(5) causes scheduler to reject and return None.
+    _make_task_full(session_factory, parent_id, "running", spawn_depth=5)
+
+    now = datetime.now(timezone.utc)
+    with session_factory() as s:
+        ev = Event(
+            event_id=_uuid.uuid4(),
+            schema_version=1,
+            event_type="TASK_DISCOVERED",
+            task_id=parent_id,
+            emitted_by="backend-agent",
+            emitted_at=now,
+            payload={
+                "parent_task_id": parent_id,
+                "title": "Child task",
+                "owner_hint": "backend-agent",
+                "reason": "test",
+                "outputs": [],
+                "dependencies": [],
+                "checkpoint": {},
+            },
+        )
+        s.add(ev)
+        s.commit()
+
+    with session_factory() as session:
+        dispatcher._on_task_discovered(parent_id, session)
+
+    with session_factory() as s:
+        parent = s.get(Task, parent_id)
+        assert parent.status == "failed"
+
+    messages = dispatcher._publisher._r.xrange(STREAM_KEY)
+    failed_msgs = [
+        m for _, m in messages
+        if m.get("event_type") == "TASK_FAILED" and m.get("task_id") == parent_id
+    ]
+    assert len(failed_msgs) >= 1
 
 
 def test_recover_stale_skips_task_with_active_run(

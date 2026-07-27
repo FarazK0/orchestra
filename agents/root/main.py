@@ -530,6 +530,138 @@ def _seed_shared_conventions(
 
 
 # ---------------------------------------------------------------------------
+# Task splitting helpers
+# ---------------------------------------------------------------------------
+
+_MAX_OUTPUTS: int = int(os.getenv("ORCHESTRA_MAX_OUTPUTS_BEFORE_REVIEW", "5"))
+
+_SPLIT_SYSTEM = (
+    "You are a task planning assistant. Split an oversized software task into exactly "
+    "two smaller, semantically coherent sub-tasks. Return ONLY a JSON object — no "
+    "markdown fences, no commentary."
+)
+
+_SPLIT_USER_TMPL = """\
+Split this oversized task into exactly 2 sub-tasks.
+
+Original task:
+  title: {title}
+  owner: {owner}
+  outputs: {outputs}
+  acceptance: {acceptance}
+
+Rules:
+- Each group should have at most {max_outputs} outputs.
+- Divide the outputs between group_a and group_b by semantic theme (e.g. model vs tests).
+- Divide acceptance criteria proportionally.
+- Set b_depends_on_a=true if group_b's work logically requires group_a's outputs first.
+
+Return JSON (no fences):
+{{
+  "group_a": {{"title": "<title>", "outputs": ["..."], "acceptance": ["..."]}},
+  "group_b": {{"title": "<title>", "outputs": ["..."], "acceptance": ["..."]}},
+  "b_depends_on_a": true
+}}"""
+
+
+def _split_task(
+    task: dict,
+    llm_client: LLMClient,
+    max_outputs: int,
+    depth: int = 0,
+) -> list[dict]:
+    """Recursively binary-split a task until all leaves have <= max_outputs outputs."""
+    if len(task.get("outputs") or []) <= max_outputs or depth >= 4:
+        return [task]
+
+    prompt = _SPLIT_USER_TMPL.format(
+        title=task["title"],
+        owner=task.get("owner", ""),
+        outputs=json.dumps(task.get("outputs") or []),
+        acceptance=json.dumps(task.get("acceptance") or []),
+        max_outputs=max_outputs,
+    )
+    try:
+        resp = llm_client.call(
+            messages=[{"role": "user", "content": prompt}],
+            system=_SPLIT_SYSTEM,
+            max_tokens=1024,
+        )
+        raw = resp.content[0].text.strip()
+        # Strip markdown fences if the model emits them despite instructions.
+        if raw.startswith("```"):
+            raw = re.sub(r"^```[a-z]*\n?", "", raw)
+            raw = re.sub(r"\n?```$", "", raw)
+        split = json.loads(raw)
+        group_a = split["group_a"]
+        group_b = split["group_b"]
+        b_depends_on_a: bool = bool(split.get("b_depends_on_a", False))
+    except Exception as exc:
+        log.warning(
+            "_split_task: LLM split failed for %r (depth=%d): %s; keeping as-is",
+            task["title"], depth, exc,
+        )
+        return [task]
+
+    parent_deps = list(task.get("depends_on") or [])
+    sub_a: dict = {
+        "title": group_a["title"],
+        "owner": task.get("owner", ""),
+        "depends_on": parent_deps,
+        "inputs": list(task.get("inputs") or []),
+        "outputs": group_a.get("outputs") or [],
+        "acceptance": group_a.get("acceptance") or [],
+    }
+    sub_b: dict = {
+        "title": group_b["title"],
+        "owner": task.get("owner", ""),
+        "depends_on": parent_deps + ([sub_a["title"]] if b_depends_on_a else []),
+        "inputs": list(task.get("inputs") or []),
+        "outputs": group_b.get("outputs") or [],
+        "acceptance": group_b.get("acceptance") or [],
+    }
+    return _split_task(sub_a, llm_client, max_outputs, depth + 1) + _split_task(
+        sub_b, llm_client, max_outputs, depth + 1
+    )
+
+
+def _expand_plan(
+    plan: list[dict], llm_client: LLMClient | None
+) -> tuple[list[dict], dict[str, list[str]]]:
+    """Auto-split oversized tasks and rewrite depends_on references.
+
+    Returns (expanded_plan, split_leaves_map) where split_leaves_map maps each
+    original oversized task title to the list of leaf task titles that replaced it.
+    """
+    if llm_client is None:
+        return plan, {}
+
+    expanded: list[dict] = []
+    split_leaves: dict[str, list[str]] = {}
+
+    for t in plan:
+        if len(t.get("outputs") or []) > _MAX_OUTPUTS:
+            log.info(
+                "Task %r has %d outputs (> %d) — recursively splitting",
+                t["title"], len(t.get("outputs", [])), _MAX_OUTPUTS,
+            )
+            leaves = _split_task(t, llm_client, _MAX_OUTPUTS)
+            split_leaves[t["title"]] = [s["title"] for s in leaves]
+            expanded.extend(leaves)
+        else:
+            expanded.append(t)
+
+    # Rewrite depends_on references that pointed at a split task.
+    for t in expanded:
+        new_deps: list[str] = []
+        for dep in (t.get("depends_on") or []):
+            new_deps.extend(split_leaves.get(dep, [dep]))
+        t["depends_on"] = new_deps
+
+    return expanded, split_leaves
+
+
+# ---------------------------------------------------------------------------
 # Task submission
 # ---------------------------------------------------------------------------
 
@@ -553,8 +685,10 @@ def _submit_tasks(
     snapshot: str = "",
     description: str = "",
     repo_path: Path | None = None,
+    llm_client: LLMClient | None = None,
 ) -> list[str]:
     """Create tasks, seed identity memory for each agent type, approve roots."""
+    plan, _ = _expand_plan(plan, llm_client)
     ordered = topo_sort(plan)
     title_to_id: dict[str, str] = {}
 
@@ -572,12 +706,11 @@ def _submit_tasks(
             uncovered,
         )
 
-    # Size + breadth check.
+    # Breadth + acceptance check (output count is handled by _expand_plan auto-split).
     repo_files = _list_repo_files(repo_path) if repo_path else []
     oversized: list[str] = []
     for t in plan:
-        too_many_criteria = len(t.get("acceptance") or []) > 5
-        too_many_outputs = len(t.get("outputs") or []) > 2
+        too_many_criteria = len(t.get("acceptance") or []) > 15
         broad_dir = False
         for output in t.get("outputs", []):
             clean = output.lstrip("./")
@@ -591,7 +724,7 @@ def _submit_tasks(
                         output,
                         count,
                     )
-        if too_many_criteria or too_many_outputs or broad_dir:
+        if too_many_criteria or broad_dir:
             oversized.append(t["title"])
 
     needs_approval = bool(oversized)
@@ -772,6 +905,7 @@ class RootAgent:
 
         log.info("Replan: adding %d new task(s)", len(plan))
         change_id = str(uuid.uuid4())
+        _replan_llm = LLMClient() if use_api else None
         try:
             new_task_ids = _submit_tasks(
                 plan,
@@ -781,6 +915,7 @@ class RootAgent:
                 snapshot=snapshot,
                 description=replan_description,
                 repo_path=self._repo,
+                llm_client=_replan_llm,
             )
         except Exception as exc:
             log.error("Replan: task submission failed: %s", exc)
@@ -910,6 +1045,7 @@ class RootAgent:
                 snapshot=snapshot,
                 description=description,
                 repo_path=self._repo,
+                llm_client=LLMClient() if use_api else None,
             )
             log.info("Dispatched %d tasks for change [%s]: %s", len(task_ids), change_id, task_ids)
         except Exception as exc:

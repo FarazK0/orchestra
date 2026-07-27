@@ -26,7 +26,6 @@ from pathlib import Path
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from .dag import TERMINAL_STATUSES
 from .db import AgentMemory, ArtifactProvenance, Run, Task
 from .token import CapabilityError, mint_child_capability_token, mint_token
 
@@ -237,6 +236,9 @@ def build_context_package(
         children = (
             session.execute(select(Task).where(Task.parent_task_id == task_id)).scalars().all()
         )
+        # Include children that have finished work, regardless of merge status.
+        # This is broader than TERMINAL_STATUSES (which gates DAG dispatch).
+        _child_done = frozenset({"completed", "validated", "merged", "closed"})
         child_outputs = [
             {
                 "task_id": c.id,
@@ -245,7 +247,7 @@ def build_context_package(
                 "status": c.status,
             }
             for c in children
-            if c.status in TERMINAL_STATUSES
+            if c.status in _child_done
         ]
 
     # Suspension resume_context: tells the agent about prior commits on the branch.

@@ -44,7 +44,7 @@ def test_task_not_ready_dep_running(session):
 
 
 def test_task_not_ready_if_one_dep_still_pending(session):
-    done = make_task(session, "TASK-D30", status="completed")
+    done = make_task(session, "TASK-D30", status="merged")
     pending = make_task(session, "TASK-D31", status="running")
     task = make_task(session, "TASK-D32", status="created")
     task.depends_on = [done.id, pending.id]
@@ -58,7 +58,7 @@ def test_task_not_ready_if_one_dep_still_pending(session):
 
 
 def test_get_ready_successors_returns_unblocked(session):
-    a = make_task(session, "TASK-D40", status="completed")
+    a = make_task(session, "TASK-D40", status="merged")
     b = make_task(session, "TASK-D41", status="created")
     b.depends_on = [a.id]
     session.flush()
@@ -67,7 +67,7 @@ def test_get_ready_successors_returns_unblocked(session):
 
 
 def test_get_ready_successors_excludes_still_blocked(session):
-    a = make_task(session, "TASK-D50", status="completed")
+    a = make_task(session, "TASK-D50", status="merged")
     d = make_task(session, "TASK-D51", status="running")  # still running
     c = make_task(session, "TASK-D52", status="created")
     c.depends_on = [a.id, d.id]
@@ -77,7 +77,7 @@ def test_get_ready_successors_excludes_still_blocked(session):
 
 
 def test_get_ready_successors_excludes_non_created(session):
-    a = make_task(session, "TASK-D60", status="completed")
+    a = make_task(session, "TASK-D60", status="merged")
     b = make_task(session, "TASK-D61", status="assigned")
     b.depends_on = [a.id]
     session.flush()
@@ -88,7 +88,7 @@ def test_get_ready_successors_excludes_non_created(session):
 
 def test_get_ready_successors_returns_multiple(session):
     """One parent completion unblocks two siblings simultaneously."""
-    parent = make_task(session, "TASK-D62", status="completed")
+    parent = make_task(session, "TASK-D62", status="merged")
     s1 = make_task(session, "TASK-D63", status="created")
     s2 = make_task(session, "TASK-D64", status="created")
     s1.depends_on = [parent.id]
@@ -101,7 +101,7 @@ def test_get_ready_successors_returns_multiple(session):
 
 def test_get_ready_successors_excludes_one_of_two_still_blocked(session):
     """Only the fully-unblocked sibling should appear when a shared dep is still running."""
-    parent = make_task(session, "TASK-D65", status="completed")
+    parent = make_task(session, "TASK-D65", status="merged")
     still_running = make_task(session, "TASK-D66", status="running")
     unblocked = make_task(session, "TASK-D67", status="created")
     blocked = make_task(session, "TASK-D68", status="created")
@@ -187,3 +187,34 @@ def test_blocked_dep_does_not_satisfy_readiness(session):
     session.flush()
     assert task_is_ready(task, session) is False
     assert "blocked" not in TERMINAL_STATUSES
+
+
+def test_completed_dep_does_not_satisfy_readiness(session):
+    """`completed` is no longer terminal — successors must wait for `merged`."""
+    dep = make_task(session, "TASK-DC1", status="completed")
+    task = make_task(session, "TASK-DC2", status="created")
+    task.depends_on = [dep.id]
+    session.flush()
+    assert task_is_ready(task, session) is False
+    assert "completed" not in TERMINAL_STATUSES
+
+
+def test_validated_dep_does_not_satisfy_readiness(session):
+    """`validated` is no longer terminal — successors must wait for `merged`."""
+    dep = make_task(session, "TASK-DC3", status="validated")
+    task = make_task(session, "TASK-DC4", status="created")
+    task.depends_on = [dep.id]
+    session.flush()
+    assert task_is_ready(task, session) is False
+    assert "validated" not in TERMINAL_STATUSES
+
+
+def test_merged_dep_satisfies_readiness(session):
+    """`merged` is terminal — successors may dispatch."""
+    dep = make_task(session, "TASK-DC5", status="merged")
+    task = make_task(session, "TASK-DC6", status="created")
+    task.depends_on = [dep.id]
+    session.flush()
+    assert task_is_ready(task, session) is True
+    successors = get_ready_successors(dep.id, session)
+    assert any(s.id == task.id for s in successors)
