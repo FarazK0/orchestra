@@ -59,8 +59,14 @@ Rules:
   "run aws cloudformation deploy", "set a GitHub repository variable", "trigger a workflow").
   Do NOT create a human task for work an agent can do with the right tools.
 - For human tasks: set outputs to ["human-gate/<slug>/manifest.json"] where <slug> is a
-  kebab-case version of the title. Set acceptance to a list of "KEY_NAME: description"
-  items — each key the human must supply (ARN, URL, confirmation, etc.).
+  kebab-case version of the title. Set acceptance to a mixed list:
+    1. Plain-text step instructions the human must follow (imperative sentences, each a
+       separate item, e.g. "Run: aws cloudformation deploy --template-file bootstrap/...").
+       Include the exact shell commands from the spec verbatim where possible.
+    2. KEY_NAME: description items for values the human must supply (ARNs, URLs,
+       confirmations), e.g. "ARTIFACT_BUCKET_NAME: the ArtifactBucketName stack output".
+  Plain-text steps go into the manifest's "steps" list; KEY_NAME items become fillable
+  slots the human must complete before running orchctl human-done.
 - For cross-cutting tasks that span all layers, assign the identity that owns the
   majority of outputs. If the task would have more than 5 acceptance criteria or span
   more than one major subsystem, split it with a depends_on relationship instead.
