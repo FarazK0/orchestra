@@ -223,7 +223,9 @@ def _check_llm_acceptance(repo: Path, branch: str, task: Task) -> CheckResult:
     _, ls_out, _ = _git(repo, "ls-files", "--with-tree=main")
     repo_files_lines = sorted(ls_out.strip().splitlines()) if ls_out else []
     if len(repo_files_lines) > 120:
-        repo_files_lines = repo_files_lines[:120] + [f"...({len(repo_files_lines) - 120} more files)"]
+        repo_files_lines = repo_files_lines[:120] + [
+            f"...({len(repo_files_lines) - 120} more files)"
+        ]
     repo_files_block = "\n".join(repo_files_lines) if repo_files_lines else "(could not list files)"
 
     criteria_block = "\n".join(f"{i + 1}. {c}" for i, c in enumerate(criteria))
@@ -332,9 +334,7 @@ def _check_shell(
 _VENV_CACHE_ROOT = Path("/tmp/orchestra/validation-venvs")
 
 
-def _ensure_validation_venv(
-    repo: Path, req_paths: list[Path]
-) -> tuple[str, list[str], bool]:
+def _ensure_validation_venv(repo: Path, req_paths: list[Path]) -> tuple[str, list[str], bool]:
     """Return (venv_python_path, notes, install_ok).
 
     Creates (or reuses) a cached venv keyed by the combined hash of all present
@@ -374,9 +374,7 @@ def _ensure_validation_venv(
 
     any_failed = False
     for req_path in req_paths:
-        rc, out, err = _run_shell(
-            f"{pip_bin} install -r {req_path} -q", cwd=repo, timeout=900
-        )
+        rc, out, err = _run_shell(f"{pip_bin} install -r {req_path} -q", cwd=repo, timeout=900)
         if rc != 0:
             msg = f"pip install -r {req_path.name} failed: {(err or out).strip()[:200]}"
             notes.append(msg)
@@ -440,7 +438,8 @@ def _check_pytest(repo: Path, t0: float, main_repo: Path | None = None) -> Check
             return CheckResult(
                 name="pytest",
                 passed=False,
-                output="requirements install failed; cannot run pytest.\n" + "\n".join(install_notes),
+                output="requirements install failed; cannot run pytest.\n"
+                + "\n".join(install_notes),
                 duration_s=time.monotonic() - t0,
                 returncode=None,
                 failure_category="env_limitation",
@@ -494,8 +493,9 @@ def _check_ruff(repo: Path, branch: str, t0: float) -> CheckResult:
     rc, stdout, stderr = _run_shell("ruff check . --output-format=concise --color never", cwd=repo)
     out = (stdout + stderr).strip()[:800]
     if rc == 0:
-        return CheckResult(name="ruff", passed=True, output=out,
-                           duration_s=time.monotonic() - t0, returncode=0)
+        return CheckResult(
+            name="ruff", passed=True, output=out, duration_s=time.monotonic() - t0, returncode=0
+        )
 
     # Extract file names from concise format: "path/to/file.py:line:col: CODE msg"
     error_files: set[str] = set()
@@ -519,14 +519,15 @@ def _check_ruff(repo: Path, branch: str, t0: float) -> CheckResult:
             name="ruff",
             passed=True,
             output=f"WARN: pre-existing ruff errors in {sorted(untouched)} "
-                   "(outside agent scope; a cleanup task is recommended).\n" + out,
+            "(outside agent scope; a cleanup task is recommended).\n" + out,
             duration_s=time.monotonic() - t0,
             returncode=rc,
             failure_category="pre_existing",
         )
 
-    return CheckResult(name="ruff", passed=False, output=out,
-                       duration_s=time.monotonic() - t0, returncode=rc)
+    return CheckResult(
+        name="ruff", passed=False, output=out, duration_s=time.monotonic() - t0, returncode=rc
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +652,9 @@ def validate_task(
                 )
             )
         else:
-            checks.append(_check_shell(name, cfg, repo, branch=branch, main_repo=Path(repo_path).resolve()))
+            checks.append(
+                _check_shell(name, cfg, repo, branch=branch, main_repo=Path(repo_path).resolve())
+            )
 
     # Always-on: llm-acceptance (runs only when task has acceptance criteria)
     checks.append(_check_llm_acceptance(repo, branch, task))
@@ -694,8 +697,7 @@ def _finalize(
     checks: list[CheckResult] | None = None,
 ) -> None:
     env_blocked = [
-        c for c in (checks or [])
-        if not c.passed and c.failure_category == "env_limitation"
+        c for c in (checks or []) if not c.passed and c.failure_category == "env_limitation"
     ]
 
     if not passed and env_blocked:

@@ -189,7 +189,12 @@ GATEWAY_TOOLS: list[dict[str, Any]] = [
                 },
                 "owner_hint": {
                     "type": "string",
-                    "description": "Agent type to run the task: backend-agent, frontend-agent, qa-agent, or claude-code-agent.",
+                    "description": (
+                        "Agent type to run the task: backend-agent, frontend-agent, qa-agent, "
+                        "claude-code-agent, or 'human'. Use 'human' when the blocking work "
+                        "requires credentials, external system access, or a physical action "
+                        "that no agent can perform — do NOT use request_human_input for this."
+                    ),
                 },
                 "outputs": {
                     "type": "array",
@@ -500,6 +505,15 @@ def format_context_package(pkg: dict) -> str:
             lines.append("#### Shared project conventions")
             for sk in mem["shared_skills"]:
                 lines += [sk, ""]
+
+    # Human gate results: values filled in by human for upstream human-gate tasks.
+    human_gate_results: str = (pkg.get("agent_instructions") or {}).get("human_gate_results", "")
+    if human_gate_results:
+        lines += [
+            "### Human Gate Results (provided by your human predecessors)",
+            human_gate_results,
+            "",
+        ]
 
     # DAG summary: show non-terminal tasks so the agent checks before calling discover_task.
     current_dag = pkg.get("current_dag", [])

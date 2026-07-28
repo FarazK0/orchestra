@@ -27,6 +27,10 @@ These hold from the first commit. Never violate them, even for a "quick test":
    failed/escalated/awaiting_human arms). Every transition writes an event and an audit
    row in one DB transaction. New validator-triggered paths: `completed → awaiting_human`
    (env_limitation detected) and `failed → awaiting_human` (dispatcher failsafe).
+   Human-gate path: `owner=human` tasks skip subprocess dispatch, auto-advance to `running`,
+   and transition via `orchctl human-done` (running→completed→validated) then `orchctl merge`
+   (validated→merged→closed, no git merge). This unblocks DAG successors identically to
+   agent tasks.
 5. **Nothing merges to main of a managed project repo without the merge flow**
    (validator → review → merge via gateway). Tier rules come later; for now every merge
    is human-approved via `orchctl merge`.
@@ -63,6 +67,13 @@ validators (file-exists, ruff, pytest, mypy, eslint, jest, llm-acceptance); task
 assigned validators; `create-task` prompts interactively to accept/edit auto-detected list;
 `validate` displays per-check results; `GET /tasks/{id}/validation` exposes history;
 `orchctl show` and `orchctl validator list` added.
+Human-gate tasks as first-class DAG nodes (Step 30 done): planner creates `owner="human"`
+tasks upfront; dispatcher skips subprocess and auto-advances to `running`; root agent writes
+a manifest template (`human-gate/<slug>/manifest.json`) with empty key-value slots; human
+fills the manifest and runs `orchctl human-done` to transition running→completed→validated;
+`orchctl merge` closes the task without a git merge; downstream agents receive filled values
+via context packager; `orchctl ask-task` answers manifest questions using task context;
+`review` loop surfaces running human tasks with manifest status.
 
 Phase gates and weekly breakdown are in the design doc, Part 5.
 
@@ -137,14 +148,16 @@ All canonical commands live in the Makefile. Current targets:
 
 `orchctl` commands (run via `uv run orchctl`):
 - `request "description" [--spec PATH]` — submit a change request to the root agent; the root agent decomposes it into tasks and dispatches agents automatically
-- `create-task TITLE [--owner AGENT_ID] [--accept CRITERION] [--input PATH] [--output PATH] [--depends-on TASK-ID]` — create a task manually; prompts interactively to accept/edit auto-detected validators; valid `--owner` values: `backend-agent`, `frontend-agent`, `qa-agent`, `claude-code-agent`
+- `create-task TITLE [--owner AGENT_ID] [--accept CRITERION] [--input PATH] [--output PATH] [--depends-on TASK-ID]` — create a task manually; prompts interactively to accept/edit auto-detected validators; valid `--owner` values: `backend-agent`, `frontend-agent`, `qa-agent`, `claude-code-agent`, `human`
 - `list [--status STATUS]` — list tasks
 - `show TASK-ID` — full task detail: inputs, outputs, validators, acceptance criteria, and most recent validation result (works on closed tasks too)
 - `approve TASK-ID` — advance through human approval gate (created→assigned, validated→merged)
 - `run-task TASK-ID --repo PATH [--agent-id AGENT_ID]` — assemble context package and start run (assigned→running); `--agent-id` must match task owner for gateway auth
 - `validate TASK-ID --repo PATH` — run all assigned validators on agent branch, display per-check table (completed→validated/failed)
-- `merge TASK-ID --repo PATH` — merge agent branch into main via gateway, close task (validated→merged→closed)
-- `review --repo PATH` — interactive approval loop: auto-validates completed tasks, shows per-check results, prompts for merge
+- `merge TASK-ID --repo PATH` — merge agent branch into main via gateway, close task (validated→merged→closed); for `owner=human` tasks, skips git merge and closes the control-plane record only
+- `human-done TASK-ID --repo PATH` — mark a human-gate task complete: reads `human-gate/<slug>/manifest.json`, validates all keys are filled, transitions running→completed→validated. Then run `orchctl merge` to close and unblock successors.
+- `ask-task TASK-ID "question" --repo PATH [--model MODEL]` — one-shot LLM answer grounded in the task's acceptance criteria, manifest, and input files; use to get specific guidance on what format a value needs, where to find a setting, etc.
+- `review --repo PATH` — interactive approval loop: auto-validates completed tasks, shows per-check results, prompts for merge; also surfaces running human-gate tasks with their manifest status
 - `validator list` — show all validators in `permissions/validators.yaml` with name, auto-detect flag, and description
 - `memory list [--agent AGENT_ID] [--type TYPE] [--project PROJECT]` — list agent memory rows (human safety valve)
 - `memory show MEMORY_ID [--agent AGENT_ID]` — show full content of one memory row (accepts 8-char UUID prefix)

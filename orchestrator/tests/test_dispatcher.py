@@ -735,7 +735,8 @@ def test_on_task_discovered_rejected_payload_fails_parent(
 
     messages = dispatcher._publisher._r.xrange(STREAM_KEY)
     failed_msgs = [
-        m for _, m in messages
+        m
+        for _, m in messages
         if m.get("event_type") == "TASK_FAILED" and m.get("task_id") == parent_id
     ]
     assert len(failed_msgs) >= 1
@@ -767,3 +768,76 @@ def test_recover_stale_skips_task_with_active_run(
     messages = dispatcher._publisher._r.xrange(STREAM_KEY)
     assigned_msgs = [m for _, m in messages if m.get("task_id") == task_id]
     assert len(assigned_msgs) == 0
+
+
+# ---------------------------------------------------------------------------
+# Human task handling
+# ---------------------------------------------------------------------------
+
+
+def test_human_owner_task_skips_agent_launch(clean_db, redis_client, session_factory, dispatcher):
+    """owner='human' tasks must skip subprocess and advance directly to running."""
+    now = datetime.now(timezone.utc)
+    with session_factory() as s:
+        task = Task(
+            id="TASK-HUMAN01",
+            schema_version=1,
+            title="Bootstrap AWS account",
+            owner="human",
+            status="assigned",
+            depends_on=[],
+            inputs=[],
+            outputs=["human-gate/bootstrap-aws-account/manifest.json"],
+            acceptance=["DEPLOY_ROLE_ARN: the role ARN"],
+            risk_tier=1,
+            budget={"tokens": 0, "wall_clock_min": 0, "retries": 0},
+            retry_count=0,
+            created_at=now,
+            updated_at=now,
+        )
+        s.add(task)
+        s.commit()
+
+    with patch("orchestrator.orchestrator.dispatcher.subprocess.Popen") as mock_popen:
+        with session_factory() as session:
+            dispatcher._on_task_assigned("TASK-HUMAN01", session)
+
+    mock_popen.assert_not_called()
+
+    with session_factory() as s:
+        task = s.get(Task, "TASK-HUMAN01")
+        assert task.status == "running", f"Expected running, got {task.status}"
+
+
+def test_human_task_not_heartbeat_monitored(clean_db, redis_client, session_factory, dispatcher):
+    """Human tasks in 'running' state must be skipped by the heartbeat monitor."""
+    now = datetime.now(timezone.utc)
+    with session_factory() as s:
+        task = Task(
+            id="TASK-HUMAN02",
+            schema_version=1,
+            title="Configure GitHub OIDC",
+            owner="human",
+            status="running",
+            depends_on=[],
+            inputs=[],
+            outputs=["human-gate/configure-github-oidc/manifest.json"],
+            acceptance=["ROLE_ARN: configured role ARN"],
+            risk_tier=1,
+            budget={"tokens": 0, "wall_clock_min": 0, "retries": 0},
+            retry_count=0,
+            created_at=now,
+            updated_at=now,
+        )
+        s.add(task)
+        s.commit()
+
+    # _make_run is not called — no process to watch; heartbeat must still not fire
+    with patch("orchestrator.orchestrator.dispatcher.subprocess.Popen") as mock_popen:
+        dispatcher._check_heartbeats()
+
+    mock_popen.assert_not_called()
+    # Task must remain running (not erroneously escalated)
+    with session_factory() as s:
+        task = s.get(Task, "TASK-HUMAN02")
+        assert task.status == "running"

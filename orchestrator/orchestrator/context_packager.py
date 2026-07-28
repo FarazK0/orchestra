@@ -371,10 +371,33 @@ def create_run(
         if t.status in _non_terminal
     ]
 
+    # Human gate results: inject filled manifest values from completed human-gate dependencies
+    # so downstream agents receive the ARNs, URLs, and confirmations the human provided.
+    task_orm_for_deps = session.get(Task, task_id)
+    human_gate_sections: list[str] = []
+    if task_orm_for_deps and task_orm_for_deps.depends_on:
+        for dep_task_id in task_orm_for_deps.depends_on:
+            dep_task = session.get(Task, dep_task_id)
+            if dep_task is None or dep_task.owner != "human":
+                continue
+            if dep_task.status not in ("completed", "validated", "merged", "closed"):
+                continue
+            cp = dep_task.checkpoint or {}
+            filled = cp.get("human_filled_values") or {}
+            if filled:
+                lines = [f"## Human Gate: {dep_task.title} ({dep_task_id})"]
+                for k, v in filled.items():
+                    lines.append(f"  {k}: {v}")
+                human_gate_sections.append("\n".join(lines))
+
+    if human_gate_sections:
+        human_context = "\n\n".join(human_gate_sections)
+        package.setdefault("agent_instructions", {})
+        package["agent_instructions"]["human_gate_results"] = human_context
+
     # Fix 8: replace main-HEAD input artifact content with upstream branch content
     # for any dependency that has already completed — so downstream agents see the
     # actual work produced by their upstream, not the stale main-branch version.
-    task_orm_for_deps = session.get(Task, task_id)
     if task_orm_for_deps and task_orm_for_deps.depends_on:
         for dep_task_id in task_orm_for_deps.depends_on:
             dep_task = session.get(Task, dep_task_id)

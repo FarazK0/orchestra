@@ -321,7 +321,9 @@ def test_env_limitation_routes_to_awaiting_human(tmp_path):
 
     # Must NOT have posted a /transition to failed or suspended
     transition_calls = [c for c in post_calls if "/transition" in c["url"]]
-    assert len(transition_calls) == 0, f"Should not transition on env_limitation: {transition_calls}"
+    assert len(transition_calls) == 0, (
+        f"Should not transition on env_limitation: {transition_calls}"
+    )
 
 
 def test_audit_emit_failure_is_non_fatal(tmp_path):

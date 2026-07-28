@@ -530,6 +530,55 @@ def _seed_shared_conventions(
 
 
 # ---------------------------------------------------------------------------
+# Human task manifest
+# ---------------------------------------------------------------------------
+
+
+def _write_human_manifest(task_def: dict, task_id: str, repo_path: Path) -> None:
+    """Write a manifest template for a human task so the human knows what to fill in.
+
+    The manifest lives at human-gate/<slug>/manifest.json in the repo. The human
+    fills in the empty values and runs `orchctl human-done` to complete the task.
+    """
+    import re
+
+    slug = re.sub(r"[^a-z0-9]+", "-", task_def["title"].lower()).strip("-")[:50]
+    manifest_path = repo_path / "human-gate" / slug / "manifest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Parse acceptance items: "KEY_NAME: description" → extract key + hint
+    values: dict[str, str] = {}
+    key_hints: dict[str, str] = {}
+    for item in task_def.get("acceptance") or []:
+        if ":" in item:
+            key, _, hint = item.partition(":")
+            key = key.strip().replace(" ", "_").upper()
+            if key:
+                values[key] = ""
+                key_hints[key] = hint.strip()
+
+    # Build step list from acceptance items that don't look like KEY: desc pairs
+    steps = [a for a in (task_def.get("acceptance") or []) if ":" not in a or a.startswith("Run")]
+
+    manifest = {
+        "task_id": task_id,
+        "title": task_def["title"],
+        "instructions": (
+            f"Complete the steps below, then fill in the values and run:\n"
+            f"  orchctl human-done {task_id} --repo <repo-path>"
+        ),
+        "steps": steps if steps else [a for a in (task_def.get("acceptance") or [])],
+        "key_hints": key_hints,
+        "values": values,
+    }
+
+    import json
+
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    log.info("Human manifest template written: %s", manifest_path)
+
+
+# ---------------------------------------------------------------------------
 # Task splitting helpers
 # ---------------------------------------------------------------------------
 
@@ -599,7 +648,9 @@ def _split_task(
     except Exception as exc:
         log.warning(
             "_split_task: LLM split failed for %r (depth=%d): %s; keeping as-is",
-            task["title"], depth, exc,
+            task["title"],
+            depth,
+            exc,
         )
         return [task]
 
@@ -643,7 +694,9 @@ def _expand_plan(
         if len(t.get("outputs") or []) > _MAX_OUTPUTS:
             log.info(
                 "Task %r has %d outputs (> %d) — recursively splitting",
-                t["title"], len(t.get("outputs", [])), _MAX_OUTPUTS,
+                t["title"],
+                len(t.get("outputs", [])),
+                _MAX_OUTPUTS,
             )
             leaves = _split_task(t, llm_client, _MAX_OUTPUTS)
             split_leaves[t["title"]] = [s["title"] for s in leaves]
@@ -654,7 +707,7 @@ def _expand_plan(
     # Rewrite depends_on references that pointed at a split task.
     for t in expanded:
         new_deps: list[str] = []
-        for dep in (t.get("depends_on") or []):
+        for dep in t.get("depends_on") or []:
             new_deps.extend(split_leaves.get(dep, [dep]))
         t["depends_on"] = new_deps
 
@@ -758,6 +811,11 @@ def _submit_tasks(
             title_to_id[task_def["title"]] = created["id"]
             log.info("Created %s: %r [%s]", created["id"], created["title"], created["owner"])
 
+            # For human tasks: write the manifest template to the repo so the human
+            # knows exactly what values to fill in before running orchctl human-done.
+            if task_def["owner"] == "human" and repo_path:
+                _write_human_manifest(task_def, created["id"], repo_path)
+
         if needs_approval:
             # Leave all tasks in 'created' — human must orchctl approve each one.
             pass
@@ -778,13 +836,13 @@ def _submit_tasks(
                 resp.raise_for_status()
                 log.info("Approved %s -> assigned", task_id)
 
-    # Seed identity memory for each unique agent type in the plan.
+    # Seed identity memory for each unique agent type in the plan (skip human — no LLM loop).
     seen_agents: set[str] = set()
     task_ids = list(title_to_id.values())
     sample_task_id_for_shared = task_ids[0] if task_ids else ""
     for task_def in ordered:
         agent_id = task_def["owner"]
-        if agent_id in seen_agents:
+        if agent_id in seen_agents or agent_id == "human":
             continue
         seen_agents.add(agent_id)
         sample_task_id = title_to_id[task_def["title"]]

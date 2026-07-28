@@ -217,6 +217,20 @@ class Dispatcher:
                 [t.id for t in conflicts],
             )
             return  # _recover_stale will retry once conflicts clear
+
+        # Human-gate tasks: no agent subprocess — advance directly to running.
+        if task.owner == "human":
+            transition(
+                session,
+                task_id,
+                "running",
+                actor="human-gate",
+                details={"reason": "human task — no agent launched"},
+            )
+            session.commit()
+            log.info("Human task %s is now running — waiting for orchctl human-done", task_id)
+            return
+
         repo = Path(task.project_path) if task.project_path else self._repo_path
         run = create_run(session, task_id, task.owner, repo, self._store_dir)
         run.log_path = str(self._store_dir / "logs" / f"{run.run_id}.log")
@@ -252,8 +266,8 @@ class Dispatcher:
                 task.checkpoint = {
                     "type": "awaiting_human",
                     "question": "Task failed due to environment limitation (dependency install). "
-                                "See last validation result for details. "
-                                "Fix requirements.txt and respond to re-run.",
+                    "See last validation result for details. "
+                    "Fix requirements.txt and respond to re-run.",
                     "question_type": "blocker",
                     "human_response": None,
                 }
@@ -758,6 +772,9 @@ class Dispatcher:
 
             for task in running_tasks:
                 try:
+                    if task.owner == "human":
+                        continue  # human tasks have no heartbeat — they run until orchctl human-done
+
                     if r.exists(f"task:{task.id}:heartbeat"):
                         continue  # alive
 

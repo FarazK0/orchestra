@@ -535,6 +535,26 @@ def merge(
         agent_type = task["owner"].removesuffix("-agent")
         branch = f"agent/{agent_type}/{task_id}"
 
+    # Human tasks have no agent branch — skip git merge, just close in control plane.
+    if task["owner"] == "human":
+        merge_details: dict = {}
+        if tier_2_override:
+            merge_details["tier2_override"] = True
+        with _client() as c:
+            resp = c.post(
+                f"/tasks/{task_id}/transition",
+                json={"new_status": "merged", "actor": actor, "details": merge_details},
+            )
+        _handle_error(resp)
+        with _client() as c:
+            resp = c.post(
+                f"/tasks/{task_id}/transition",
+                json={"new_status": "closed", "actor": actor},
+            )
+        _handle_error(resp)
+        typer.echo(f"Closed human task {task_id} — no git merge needed.")
+        return
+
     # 2. Git merge via gateway.
     with httpx.Client(base_url=gw, timeout=30.0) as gw_client:
         resp = gw_client.post(
@@ -551,7 +571,7 @@ def merge(
     sha = resp.json().get("sha", "?")
 
     # 3. Transition validated → merged.
-    merge_details: dict = {}
+    merge_details = {}
     if tier_2_override:
         merge_details["tier2_override"] = True
     with _client() as c:
@@ -607,6 +627,213 @@ def validate(
     typer.echo(f"Validated {task_id}: status is now {task['status']!r}")
     if v:
         _show_validation(v)
+
+
+# ---------------------------------------------------------------------------
+# human-done — mark a human-gate task complete
+# ---------------------------------------------------------------------------
+
+
+@app.command("human-done")
+def human_done(
+    task_id: str = typer.Argument(..., help="Task ID, e.g. TASK-005."),
+    repo: str = typer.Option(..., "--repo", "-r", help="Absolute path to the managed Git repo."),
+    actor: str = typer.Option("human", help="Actor name recorded in the audit log."),
+) -> None:
+    """Mark a human-gate task as complete.
+
+    \b
+    The task must be owner='human' and status='running'.
+    Reads the manifest at human-gate/<slug>/manifest.json in the repo.
+    If the manifest doesn't exist yet, creates a template and exits.
+    If the manifest has unfilled values, lists them and exits.
+    On success: transitions running → completed → validated.
+    Then run: orchctl merge TASK-ID to close and unblock successors.
+    """
+    import json
+    import re
+
+    with _client() as c:
+        resp = c.get(f"/tasks/{task_id}")
+    _handle_error(resp)
+    task = resp.json()
+
+    if task["owner"] != "human":
+        typer.echo(f"Error: {task_id} owner is {task['owner']!r} — not a human task.", err=True)
+        raise typer.Exit(1)
+    if task["status"] != "running":
+        typer.echo(
+            f"Error: {task_id} is {task['status']!r} — must be 'running' for human-done.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Locate manifest
+    slug = re.sub(r"[^a-z0-9]+", "-", task["title"].lower()).strip("-")[:50]
+    manifest_path = Path(repo) / "human-gate" / slug / "manifest.json"
+
+    if not manifest_path.exists():
+        # Generate template from acceptance list
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        values: dict[str, str] = {}
+        key_hints: dict[str, str] = {}
+        for item in task.get("acceptance") or []:
+            if ":" in item:
+                key, _, hint = item.partition(":")
+                key = key.strip().replace(" ", "_").upper()
+                if key:
+                    values[key] = ""
+                    key_hints[key] = hint.strip()
+        steps = [a for a in (task.get("acceptance") or []) if ":" not in a or a.startswith("Run")]
+        manifest = {
+            "task_id": task_id,
+            "title": task["title"],
+            "instructions": f"Fill in the values below, then run:\n  orchctl human-done {task_id} --repo {repo}",
+            "steps": steps if steps else list(task.get("acceptance") or []),
+            "key_hints": key_hints,
+            "values": values,
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        typer.echo(f"\n  Manifest template created at:\n    {manifest_path}\n")
+        typer.echo("  Fill in the values, then run this command again.")
+        return
+
+    # Validate the manifest
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        typer.echo(f"Error reading manifest: {exc}", err=True)
+        raise typer.Exit(1)
+
+    filled = manifest.get("values") or {}
+    empty_keys = [k for k, v in filled.items() if not str(v).strip()]
+    if empty_keys:
+        typer.echo(f"\n  {_r('Manifest has unfilled values:')}")
+        hints = manifest.get("key_hints") or {}
+        for k in empty_keys:
+            typer.echo(f"    {_b(k)}: {hints.get(k, '(no hint)')}")
+        typer.echo(f"\n  Fill these in {manifest_path} and run again.")
+        raise typer.Exit(1)
+
+    # Transition running → completed
+    with _client() as c:
+        resp = c.post(
+            f"/tasks/{task_id}/transition",
+            json={
+                "new_status": "completed",
+                "actor": actor,
+                "details": {"human_filled_values": filled},
+            },
+        )
+    _handle_error(resp)
+
+    # Transition completed → validated (auto-pass; human-verified)
+    filled_keys = list(filled.keys())
+    with _client() as c:
+        resp = c.post(
+            f"/tasks/{task_id}/transition",
+            json={
+                "new_status": "validated",
+                "actor": actor,
+                "details": {
+                    "checks": [
+                        {
+                            "name": "human-verified",
+                            "passed": True,
+                            "notes": f"Human supplied: {', '.join(filled_keys)}",
+                        }
+                    ]
+                },
+            },
+        )
+    _handle_error(resp)
+
+    typer.echo(f"\n  {_g('Human task complete:')} {task_id} is now validated.")
+    typer.echo(f"  Run: orchctl merge {task_id} to close and unblock successors.\n")
+
+
+# ---------------------------------------------------------------------------
+# ask-task — query agent for a running human-gate task
+# ---------------------------------------------------------------------------
+
+
+@app.command("ask-task")
+def ask_task(
+    task_id: str = typer.Argument(..., help="Task ID of a human-gate task."),
+    question: str = typer.Argument(..., help="Question to ask about this task."),
+    repo: str = typer.Option(..., "--repo", "-r", help="Absolute path to the managed Git repo."),
+    model: str = typer.Option(
+        None,
+        "--model",
+        help="LLM model override (defaults to LLM_MODEL env var or claude-sonnet-4-6).",
+    ),
+) -> None:
+    """Ask a question about a human-gate task.
+
+    \b
+    Reads the task context (acceptance criteria, manifest, dependent task outputs)
+    and answers using the LLM. Use this to get specific guidance on what to do,
+    what format a value should be in, etc.
+
+    Example:
+      orchctl ask-task TASK-005 "What exact format does DEPLOY_ROLE_ARN need?"
+    """
+    import json
+    import re
+
+    if not _HAS_LLM:
+        typer.echo("Error: LLM client not available. Set ANTHROPIC_API_KEY.", err=True)
+        raise typer.Exit(1)
+
+    with _client() as c:
+        resp = c.get(f"/tasks/{task_id}")
+    _handle_error(resp)
+    task = resp.json()
+
+    # Build context: acceptance criteria + manifest (if it exists)
+    slug = re.sub(r"[^a-z0-9]+", "-", task["title"].lower()).strip("-")[:50]
+    manifest_path = Path(repo) / "human-gate" / slug / "manifest.json"
+    manifest_text = ""
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_text = f"\n\nManifest:\n{json.dumps(manifest, indent=2)}"
+        except Exception:
+            pass
+
+    # Read a few key input files for context
+    input_snippets: list[str] = []
+    for inp in (task.get("inputs") or [])[:5]:
+        p = Path(repo) / inp
+        if p.exists() and p.stat().st_size < 8000:
+            try:
+                input_snippets.append(
+                    f"--- {inp} ---\n{p.read_text(encoding='utf-8', errors='replace')[:2000]}"
+                )
+            except Exception:
+                pass
+
+    context = (
+        f"Task: {task['id']} — {task['title']}\n"
+        f"Owner: {task['owner']}\n"
+        f"Status: {task['status']}\n\n"
+        f"Acceptance criteria (instructions):\n"
+        + "\n".join(f"  • {a}" for a in (task.get("acceptance") or []))
+        + manifest_text
+        + ("\n\nInput files:\n" + "\n\n".join(input_snippets) if input_snippets else "")
+    )
+
+    llm = _LLMClient(model=model) if model else _LLMClient()
+    system = (
+        "You are a read-only assistant helping a human complete a task. "
+        "Answer the question below using only the task context provided. "
+        "Cite specific values, formats, or file locations where relevant. "
+        "Be concise and actionable."
+    )
+    prompt = f"{context}\n\nQuestion: {question}"
+    response = llm.call(messages=[{"role": "user", "content": prompt}], system=system)
+    answer = response.content[0].text if response.content else "(no response)"
+    typer.echo(f"\n{answer}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -861,6 +1088,40 @@ def _handle_task(task: dict, repo: str, gw: str) -> None:
     if task.get("acceptance"):
         for criterion in task["acceptance"]:
             typer.echo(f"  {_d('•')} {criterion}")
+
+    if status == "running" and task.get("owner") == "human":
+        import json as _json
+        import re as _re
+
+        typer.echo(f"\n  {_b('Human task in progress.')} Acceptance criteria:")
+        for item in task.get("acceptance") or []:
+            typer.echo(f"  {_d('•')} {item}")
+        slug = _re.sub(r"[^a-z0-9]+", "-", task["title"].lower()).strip("-")[:50]
+        manifest_path = Path(repo) / "human-gate" / slug / "manifest.json"
+        if manifest_path.exists():
+            try:
+                manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+                filled = manifest.get("values") or {}
+                empty = [k for k, v in filled.items() if not str(v).strip()]
+                if empty:
+                    typer.echo(f"\n  {_r('Manifest values still needed:')}")
+                    hints = manifest.get("key_hints") or {}
+                    for k in empty:
+                        typer.echo(f"    {_b(k)}: {hints.get(k, '')}")
+                    typer.echo(f"\n  Fill in: {manifest_path}")
+                    typer.echo(f"  Then run: orchctl human-done {task_id} --repo {repo}")
+                else:
+                    typer.echo(f"\n  {_g('Manifest values look complete.')} All keys filled.")
+            except Exception:
+                pass
+        else:
+            typer.echo(f"\n  Run to create manifest: orchctl human-done {task_id} --repo {repo}")
+        typer.echo(
+            f"\n  When done, run:\n"
+            f"    orchctl human-done {task_id} --repo {repo}\n"
+            f"    orchctl merge {task_id} --repo {repo}"
+        )
+        return
 
     if status == "completed":
         typer.echo(f"\n  Validating {task_id}...")
@@ -1134,8 +1395,13 @@ def review(
                 typer.echo("  No tasks found.")
                 break
 
-            pending = [t for t in tasks if t["status"] in _PENDING]
-            running = [t for t in tasks if t["status"] == "running"]
+            pending = [
+                t
+                for t in tasks
+                if t["status"] in _PENDING
+                or (t["status"] == "running" and t.get("owner") == "human")
+            ]
+            running = [t for t in tasks if t["status"] == "running" and t.get("owner") != "human"]
             done = all(t["status"] in _TERMINAL for t in tasks)
 
             # Present each pending task once (or re-present if it moved to validated).

@@ -16,7 +16,7 @@ _TASK_JSON_SCHEMA = """\
 Return ONLY a JSON array -- no explanation, no markdown code fences. Each element:
 {
   "title":      "<short imperative phrase>",
-  "owner":      "<agent-id>",
+  "owner":      "<agent-id or 'human'>",
   "depends_on": ["<exact title of another task in this list>"],
   "inputs":     ["<repo-relative file path this task reads>"],
   "outputs":    ["<repo-relative directory/ or file path this task exclusively owns — include root-level config files explicitly if no other task covers them (e.g. docker-compose.yml, .env.example, Makefile, next.config.ts, tailwind.config.ts, postcss.config.mjs, tsconfig.json)>"],
@@ -37,6 +37,10 @@ that reflects the domain specialisation the agent brings to the work:
   backend-agent   -- specialises in: APIs, data models, business logic, migrations, tests
   frontend-agent  -- specialises in: HTML, CSS, JavaScript, UI templates, browser interaction
   qa-agent        -- specialises in: test plans, QA reports, risk assessment (no new features)
+  human           -- for steps that NO agent can do: requires credentials, external system
+                     access (AWS console, GitHub UI, DNS registrar), physical action, or
+                     out-of-band approval. Human tasks block successors in the DAG exactly
+                     like agent tasks.
 
 The execution backend (which code actually runs the LLM loop) is a system-wide setting
 and is NOT determined by the owner field. Assign the identity whose specialisation best
@@ -51,13 +55,19 @@ Rules:
 - Use backend-agent for server-side work (APIs, DB models, business logic, migrations).
 - Use frontend-agent for client-side work (HTML, CSS, JS, UI templates).
 - Use qa-agent for test-only tasks that validate existing features, not implement them.
+- Use human when the spec explicitly describes an action only a human can perform (e.g.
+  "run aws cloudformation deploy", "set a GitHub repository variable", "trigger a workflow").
+  Do NOT create a human task for work an agent can do with the right tools.
+- For human tasks: set outputs to ["human-gate/<slug>/manifest.json"] where <slug> is a
+  kebab-case version of the title. Set acceptance to a list of "KEY_NAME: description"
+  items — each key the human must supply (ARN, URL, confirmation, etc.).
 - For cross-cutting tasks that span all layers, assign the identity that owns the
   majority of outputs. If the task would have more than 5 acceptance criteria or span
   more than one major subsystem, split it with a depends_on relationship instead.
-- backend-agent tasks have no depends_on (they are always roots).
+- backend-agent tasks with no dependency on human gates have no depends_on (they are roots).
 - frontend-agent and qa-agent tasks depend on the backend tasks whose outputs they consume.
 - Root tasks (no depends_on) will be dispatched immediately.
-- Downstream tasks unblock when their depends_on are all closed.
+- Downstream tasks unblock when their depends_on are all merged/closed.
 - Keep the plan to 1-5 tasks; do not over-split a change an agent can handle in one go.
 - Do not re-create tasks for work already done per the existing tasks list.
 - Do not include risk_tier; the planner sets it to 1 for all tasks.

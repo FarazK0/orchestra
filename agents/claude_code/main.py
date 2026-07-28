@@ -142,6 +142,12 @@ def _build_instruction(pkg: dict, repo_path: str) -> str:
         )
         memory_section = "\n".join(parts)
 
+    # Human gate results: key-value pairs filled in by human predecessors.
+    human_gate_section = ""
+    human_gate_results: str = pkg.get("agent_instructions", {}).get("human_gate_results", "")
+    if human_gate_results:
+        human_gate_section = f"\n## Human Gate Results\n\nYour predecessor human tasks have provided these values:\n\n{human_gate_results}\n"
+
     # DAG section: show non-terminal tasks so the agent can decide before emitting
     # TASK_DISCOVERED whether the work is already planned.
     dag_section = ""
@@ -189,7 +195,7 @@ Command to emit TASK_DISCOVERED (fill in the placeholders):
           "parent_task_id": "{task_id_val}",
           "title": "<one-line title of the work needed>",
           "reason": "<why your task needs this work>",
-          "owner_hint": "<backend-agent|frontend-agent|qa-agent|claude-code-agent>",
+          "owner_hint": "<backend-agent|frontend-agent|qa-agent|claude-code-agent|human>",
           "outputs": ["<paths the new task will write>"],
           "dependencies": [],
           "checkpoint": {{
@@ -308,7 +314,7 @@ Your work will be committed to branch `{branch}` (already checked out for you).
 ## Input files
 
 {inputs_list}
-{artifact_section}{memory_section}{dag_section}{discovery_section}{human_input_section}
+{artifact_section}{human_gate_section}{memory_section}{dag_section}{discovery_section}{human_input_section}
 ## Rules
 
 - Work only within {repo_path}. Do not create files outside it.
@@ -718,7 +724,9 @@ def main(
         if not changed_paths:
             _prior = subprocess.run(
                 ["git", "rev-list", "main..HEAD", "--count"],
-                capture_output=True, text=True, cwd=repo_path,
+                capture_output=True,
+                text=True,
+                cwd=repo_path,
             )
             prior_count = int((_prior.stdout or "0").strip() or "0")
             if prior_count > 0:
@@ -728,7 +736,9 @@ def main(
                 )
                 _prior_diff = subprocess.run(
                     ["git", "diff", "--name-only", "main..HEAD"],
-                    capture_output=True, text=True, cwd=repo_path,
+                    capture_output=True,
+                    text=True,
+                    cwd=repo_path,
                 )
                 changed_paths = [p.strip() for p in _prior_diff.stdout.splitlines() if p.strip()]
                 used_prior_commits = True
@@ -744,7 +754,9 @@ def main(
         if used_prior_commits:
             _head = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
-                capture_output=True, text=True, cwd=repo_path,
+                capture_output=True,
+                text=True,
+                cwd=repo_path,
             )
             sha = _head.stdout.strip() or "?"
             log.info("Using prior commit sha=%s", sha)
