@@ -760,26 +760,38 @@ def human_done(
 @app.command("ask-task")
 def ask_task(
     task_id: str = typer.Argument(..., help="Task ID of a human-gate task."),
-    question: str = typer.Argument(..., help="Question to ask about this task."),
+    question: str = typer.Argument(
+        None, help="Question to ask. Omit to start an interactive session."
+    ),
     repo: str = typer.Option(..., "--repo", "-r", help="Absolute path to the managed Git repo."),
+    session: bool = typer.Option(
+        False, "--session", "-s", help="Start a multi-turn interactive session instead of one-shot."
+    ),
     model: str = typer.Option(
         None,
         "--model",
         help="LLM model override (defaults to LLM_MODEL env var or claude-sonnet-4-6).",
     ),
 ) -> None:
-    """Ask a question about a human-gate task.
+    """Ask a question about a human-gate task, or start a session.
 
     \b
-    Reads the task context (acceptance criteria, manifest, dependent task outputs)
-    and answers using the LLM. Use this to get specific guidance on what to do,
-    what format a value should be in, etc.
+    One-shot (default): answer a single question then exit.
+      orchctl ask-task TASK-007 "What commands do I run?" --repo /path/to/repo
 
-    Example:
-      orchctl ask-task TASK-005 "What exact format does DEPLOY_ROLE_ARN need?"
+    Session mode: interactive multi-turn conversation with full task context.
+      orchctl ask-task TASK-007 --session --repo /path/to/repo
+
+    Reads task context (acceptance criteria, manifest, input files) and grounds
+    every answer in that material. Read-only — does not modify the task or repo.
+    Backend is set with 'orchctl config set llm-backend <claude|python>'.
     """
     import json
     import re
+
+    if not session and not question:
+        typer.echo("Error: provide a QUESTION or use --session for interactive mode.", err=True)
+        raise typer.Exit(1)
 
     with _client() as c:
         resp = c.get(f"/tasks/{task_id}")
@@ -821,12 +833,29 @@ def ask_task(
 
     system = (
         "You are a read-only assistant helping a human complete a task. "
-        "Answer the question below using only the task context provided. "
+        f"Task context:\n\n{context}\n\n"
+        "Answer questions using only the context above. "
         "Cite specific values, formats, or file locations where relevant. "
-        "Be concise and actionable."
+        "Be concise and actionable. Do not modify the repo or task state."
     )
-    prompt = f"{context}\n\nQuestion: {question}"
 
+    if session:
+        typer.echo(
+            f"\n  {_b('[task session: ' + task_id + ']')}  "
+            f"{task['title']}\n"
+            "  Launching interactive session — type 'exit' to end.\n"
+        )
+        if _get_llm_backend() == "python":
+            if not _HAS_LLM:
+                typer.echo("Error: LLM client not available. Set ANTHROPIC_API_KEY.", err=True)
+                raise typer.Exit(1)
+            _llm_session(task_id, [], system, model or "claude-sonnet-4-6")
+        else:
+            _claude_session(task_id, system)
+        return
+
+    # One-shot mode
+    prompt = f"{question}"
     if _get_llm_backend() == "python":
         if not _HAS_LLM:
             typer.echo("Error: LLM client not available. Set ANTHROPIC_API_KEY.", err=True)

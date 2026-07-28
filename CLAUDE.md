@@ -156,7 +156,7 @@ All canonical commands live in the Makefile. Current targets:
 - `validate TASK-ID --repo PATH` — run all assigned validators on agent branch, display per-check table (completed→validated/failed)
 - `merge TASK-ID --repo PATH` — merge agent branch into main via gateway, close task (validated→merged→closed); for `owner=human` tasks, skips git merge and closes the control-plane record only
 - `human-done TASK-ID --repo PATH` — mark a human-gate task complete: reads `human-gate/<slug>/manifest.json`, validates all keys are filled, transitions running→completed→validated. Then run `orchctl merge` to close and unblock successors.
-- `ask-task TASK-ID "question" --repo PATH [--model MODEL]` — one-shot LLM answer grounded in the task's acceptance criteria, manifest, and input files; use to get specific guidance on what format a value needs, where to find a setting, etc.
+- `ask-task TASK-ID "question" --repo PATH [--model MODEL]` — one-shot LLM answer grounded in the task's acceptance criteria, manifest, and input files; use to get specific guidance on what format a value needs, where to find a setting, etc. Add `--session` (or omit the question) for a multi-turn interactive conversation that remembers prior answers within the session.
 - `review --repo PATH` — interactive approval loop: auto-validates completed tasks, shows per-check results, prompts for merge; also surfaces running human-gate tasks with their manifest status
 - `validator list` — show all validators in `permissions/validators.yaml` with name, auto-detect flag, and description
 - `memory list [--agent AGENT_ID] [--type TYPE] [--project PROJECT]` — list agent memory rows (human safety valve)
