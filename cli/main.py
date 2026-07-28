@@ -781,10 +781,6 @@ def ask_task(
     import json
     import re
 
-    if not _HAS_LLM:
-        typer.echo("Error: LLM client not available. Set ANTHROPIC_API_KEY.", err=True)
-        raise typer.Exit(1)
-
     with _client() as c:
         resp = c.get(f"/tasks/{task_id}")
     _handle_error(resp)
@@ -823,7 +819,6 @@ def ask_task(
         + ("\n\nInput files:\n" + "\n\n".join(input_snippets) if input_snippets else "")
     )
 
-    llm = _LLMClient(model=model) if model else _LLMClient()
     system = (
         "You are a read-only assistant helping a human complete a task. "
         "Answer the question below using only the task context provided. "
@@ -831,9 +826,17 @@ def ask_task(
         "Be concise and actionable."
     )
     prompt = f"{context}\n\nQuestion: {question}"
-    response = llm.call(messages=[{"role": "user", "content": prompt}], system=system)
-    answer = response.content[0].text if response.content else "(no response)"
-    typer.echo(f"\n{answer}\n")
+
+    if _get_llm_backend() == "python":
+        if not _HAS_LLM:
+            typer.echo("Error: LLM client not available. Set ANTHROPIC_API_KEY.", err=True)
+            raise typer.Exit(1)
+        llm = _LLMClient(model=model) if model else _LLMClient()
+        response = llm.call(messages=[{"role": "user", "content": prompt}], system=system)
+        answer = response.content[0].text if response.content else "(no response)"
+        typer.echo(f"\n{answer}\n")
+    else:
+        _claude_ask(task_id, prompt, system)
 
 
 # ---------------------------------------------------------------------------
