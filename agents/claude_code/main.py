@@ -813,21 +813,7 @@ def main(
         except Exception as exc:
             log.warning("File-write audit emit failed (non-fatal): %s", exc)
 
-        # ── 5. Transition task to completed ───────────────────────────────
-        hb_stop.set()
-        try:
-            _call(
-                http,
-                "POST",
-                f"{orch_url}/tasks/{task_id}/transition",
-                json={"new_status": "completed", "actor": "claude-code-agent"},
-            )
-            log.info("Task %s marked completed", task_id)
-        except httpx.HTTPStatusError as exc:
-            log.error("Transition to completed failed: %s", exc.response.text)
-            raise typer.Exit(1)
-
-        # ── 6. Write skill memory ──────────────────────────────────────────
+        # ── 5. Write skill memory (while task is still running) ───────────
         task_title = pkg.get("task", {}).get("title", task_id)
         files_summary = ", ".join(changed_paths[:20]) or "(none)"
         skill_content = (f"Task: {task_title}\nFiles produced: {files_summary}\nBranch: {branch}")[
@@ -851,6 +837,20 @@ def main(
             log.info("Skill memory written for task %s", task_id)
         except Exception as exc:
             log.warning("Skill memory write failed (non-fatal): %s", exc)
+
+        # ── 6. Transition task to completed ───────────────────────────────
+        hb_stop.set()
+        try:
+            _call(
+                http,
+                "POST",
+                f"{orch_url}/tasks/{task_id}/transition",
+                json={"new_status": "completed", "actor": "claude-code-agent"},
+            )
+            log.info("Task %s marked completed", task_id)
+        except httpx.HTTPStatusError as exc:
+            log.error("Transition to completed failed: %s", exc.response.text)
+            raise typer.Exit(1)
 
     log.info("Claude Code agent done: task=%s", task_id)
 
