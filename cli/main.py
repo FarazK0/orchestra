@@ -49,6 +49,61 @@ def _client(timeout: float = 10.0) -> httpx.Client:
     return httpx.Client(base_url=_URL, timeout=timeout)
 
 
+def _append_worklog(repo: str, task: dict, branch: str, sha: str) -> None:
+    """Append one entry to WORKLOG.md on main. Non-fatal if it fails."""
+    import datetime
+    import subprocess
+    from pathlib import Path
+
+    orch_url = os.getenv("ORCHESTRATOR_URL", "http://localhost:8080")
+    work_summary = ""
+    try:
+        with httpx.Client(base_url=orch_url, timeout=10.0) as c:
+            r = c.get(f"/tasks/{task['id']}/events", params={"event_type": "WORK_SUMMARY"})
+            r.raise_for_status()
+            evts = r.json()
+            if evts:
+                work_summary = evts[-1].get("payload", {}).get("summary", "")
+    except Exception:
+        pass
+
+    today = datetime.date.today().isoformat()
+    criteria = "\n".join(f"- {c}" for c in (task.get("acceptance_criteria") or []))
+    summary_block = f"\n**Agent work summary:**\n{work_summary}\n" if work_summary else ""
+    sha_display = sha if sha and sha != "?" else "(human task — no git merge)"
+
+    entry = (
+        f"\n## {task['id']} — {task['title']} ({today})\n\n"
+        f"| Field | Value |\n|-------|-------|\n"
+        f"| Owner | {task['owner']} |\n"
+        f"| Branch | {branch or '(human)'} |\n"
+        f"| Merge SHA | {sha_display} |\n\n"
+        + (f"**Acceptance criteria:**\n{criteria}\n\n" if criteria else "")
+        + summary_block
+        + "\n---\n"
+    )
+
+    worklog_path = Path(repo) / "WORKLOG.md"
+    if not worklog_path.exists():
+        worklog_path.write_text(
+            "# WORKLOG\n\nAppend-only history of merged tasks.\n", encoding="utf-8"
+        )
+    with worklog_path.open("a", encoding="utf-8") as f:
+        f.write(entry)
+
+    try:
+        subprocess.run(["git", "add", "WORKLOG.md"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", f"chore: WORKLOG entry for {task['id']}"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+        )
+        typer.echo(f"WORKLOG.md updated for {task['id']}.")
+    except subprocess.CalledProcessError as exc:
+        typer.echo(f"Warning: WORKLOG commit failed (non-fatal): {exc.stderr.decode()}", err=True)
+
+
 def _handle_error(resp: httpx.Response) -> None:
     if resp.is_error:
         try:
@@ -553,6 +608,7 @@ def merge(
             )
         _handle_error(resp)
         typer.echo(f"Closed human task {task_id} — no git merge needed.")
+        _append_worklog(repo, task, "", "")
         return
 
     # 2. Git merge via gateway.
@@ -595,6 +651,7 @@ def merge(
     _handle_error(resp)
 
     typer.echo(f"Merged {task_id}: {branch} → main (sha: {sha}), task is now closed.")
+    _append_worklog(repo, task, branch, sha)
 
 
 # ---------------------------------------------------------------------------

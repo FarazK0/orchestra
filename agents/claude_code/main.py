@@ -325,7 +325,18 @@ Your work will be committed to branch `{branch}` (already checked out for you).
 
 ## Validation checklist (pre-empt these to avoid a retry)
 
-{_build_validation_checklist(task)}"""
+{_build_validation_checklist(task)}
+
+## Work summary (emit before exiting)
+
+After all acceptance criteria are satisfied and files are committed, emit:
+
+  curl -s -X POST http://localhost:8081/emit_event \\
+      -H 'Content-Type: application/json' \\
+{auth_hdr}      -d '{{"agent_id":"{task_owner}","task_id":"{task_id_val}","event_type":"WORK_SUMMARY","payload":{{"summary":"<2-3 sentences: what you built, key technical decisions made, any issues fixed>"}}}}'
+
+Keep the summary under 300 words. Focus on WHAT changed and WHY — not file lists (those are recorded separately).
+"""
 
 
 def _call(client: httpx.Client, method: str, url: str, **kwargs) -> dict:
@@ -816,9 +827,25 @@ def main(
         # ── 5. Write skill memory (while task is still running) ───────────
         task_title = pkg.get("task", {}).get("title", task_id)
         files_summary = ", ".join(changed_paths[:20]) or "(none)"
-        skill_content = (f"Task: {task_title}\nFiles produced: {files_summary}\nBranch: {branch}")[
-            :2000
-        ]
+
+        # Read agent-written WORK_SUMMARY event to include narrative in skill memory.
+        work_summary = ""
+        try:
+            ws_resp = http.get(
+                f"{orch_url}/tasks/{task_id}/events",
+                params={"event_type": "WORK_SUMMARY"},
+            )
+            ws_resp.raise_for_status()
+            ws_events = ws_resp.json()
+            if ws_events:
+                work_summary = ws_events[-1].get("payload", {}).get("summary", "")
+        except Exception as exc:
+            log.warning("Could not fetch WORK_SUMMARY event (non-fatal): %s", exc)
+
+        summary_line = f"\nSummary: {work_summary}" if work_summary else ""
+        skill_content = (
+            f"Task: {task_title}{summary_line}\nFiles produced: {files_summary}\nBranch: {branch}"
+        )[:2000]
         try:
             _call(
                 http,
