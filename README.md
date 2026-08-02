@@ -193,14 +193,22 @@ and routes future tasks to agents with confirmed tool access.
 
 ### Claude Code UI (recommended)
 
-`make setup` asks whether you want the Claude Code path. If yes, it opens a Claude
-Code session in this directory with `/orcui` as your control panel.
+`make setup` launches a Claude Code session **inside the Orchestra directory** with
+`/orcui` as your control panel. You never open Claude Code in your project — Orchestra
+reaches into it via `SANDBOX_REPO_PATH`.
 
 ```
 /orcui                          show platform status + task list
 /orcui what should I do next?   get a recommended next action
 /orcui request "add auth"       submit a change request to the root agent
 /arch-to-tasks spec.md          decompose a spec file into a task plan
+```
+
+If you close the session and want to return to the UI later:
+
+```bash
+cd ~/tools/orchestra   # the Orchestra directory, not your project
+claude /orcui
 ```
 
 No CLI commands to memorise — describe what you want in plain English.

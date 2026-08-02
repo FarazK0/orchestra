@@ -115,7 +115,7 @@ SANDBOX_REPO_PATH="${SANDBOX_REPO_PATH:-/mnt/d/orc/orchestra/sandbox/sample-proj
 
 **Task ID normalisation:** if the user says "task 5" or "task-5", normalise to "TASK-005".
 
-**Agent IDs:** `backend-agent`, `frontend-agent`, `qa-agent`, `claude-code-agent`.
+**Agent IDs:** `backend-agent`, `frontend-agent`, `qa-agent`, `devops-agent`, or any custom identity string.
 
 ### Step 3 — No args: action menu
 
@@ -144,7 +144,7 @@ What would you like to do?
     /orcui teach backend-agent "fact"  — inject a human-taught skill
     /orcui forget backend-agent topic  — remove a human-taught skill
     /orcui ask backend-agent "Q"       — one-shot competency probe
-    /orcui session claude-code-agent   — interactive identity session
+    /orcui session backend-agent        — interactive identity session
 
   Validators and config
     /orcui show validators             — list all validators in the registry
