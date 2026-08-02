@@ -43,7 +43,7 @@ make setup         # interactive: creates .env from .env.example if missing,
 `make setup` handles `.env` for you. You only need to edit it manually to change
 defaults such as database credentials. CLI agent backends (`claude`, `gemini`, etc.)
 authenticate via their own login flow — not through `.env`. Only the `python-api`
-backend needs `ANTHROPIC_API_KEY` there, and `make setup` prompts for it if required.
+backend requires an entry there (`ANTHROPIC_API_KEY`).
 
 Verify everything is healthy:
 
