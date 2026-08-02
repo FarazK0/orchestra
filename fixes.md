@@ -54,6 +54,39 @@ Credentials (GitHub session or `GH_TOKEN`) remain the only human gate.
 
 ---
 
+### 4. Sandbox-based mutating command detection for run_command
+
+Before executing a command via `POST /run_command`, the gateway cannot reliably determine
+whether it will mutate external state (AWS, GitHub, DNS) using static analysis alone.
+
+**Design:** Run the command twice — first as a dry probe in a network-namespaced container
+with no cloud credentials injected, then (if it completes without network errors) as the
+real execution with full credentials. If the probe run exits with a credential/network
+error, the command is considered mutating and subject to tier checks before the real run
+proceeds.
+
+Implementation:
+1. Strip cloud credentials from the subprocess environment for the probe run.
+2. Launch the probe in a Docker container with `--network none` (or a network namespace
+   that blocks external traffic) and a short timeout (5–10s).
+3. If the probe exits 0 → command is read-only; run it normally, no tier check.
+4. If the probe exits with an auth/network error → mutating; apply the same tier gate
+   as Tier 2 file writes (require `tier2_override` on the task or a human gate).
+5. If the probe times out → treat as mutating (conservative).
+
+Complement with a fast verb-lookup table for well-known CLIs (`terraform plan`,
+`aws * describe*`, `kubectl get`) so the probe overhead is skipped for the common
+read-only cases.
+
+**Files to change:** `gateway/gateway/app.py` (`run_command` handler), add
+`gateway/gateway/sandbox.py` for the probe logic.
+
+**Prerequisite:** Docker must be available on the gateway host (already true for this
+stack). The existing `run_command` Docker sandbox (Phase 3) only isolates filesystem
+access; this extends it to classify mutating intent before granting credentials.
+
+---
+
 ### 2. Human input question truncated at 200 chars in events and audit rows
 
 **File:** `gateway/gateway/app.py:394,406`
