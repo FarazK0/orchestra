@@ -63,6 +63,81 @@ orchctl request "add a login endpoint"
 `orchctl` works from any directory once globally installed. `SANDBOX_REPO_PATH` tells it
 which project to target; export it in your shell profile to make it permanent.
 
+## Using it with any local repo
+
+Orchestra manages a *target* repo — any git project on your machine. It never
+touches the Orchestra repo itself. The only thing that ties it to a project is
+`SANDBOX_REPO_PATH`.
+
+### Point it at your project
+
+```bash
+export SANDBOX_REPO_PATH=/path/to/my-project
+```
+
+Add this to `~/.bashrc` (or `~/.zshrc`) if you're always working on the same project.
+Switch projects any time by changing the variable — no restart needed.
+
+### Submit a change request
+
+```bash
+orchctl request "add JWT auth to the login endpoint"
+```
+
+The root agent decomposes the request into tasks, creates branches in your repo
+(`orchestra/<task-id>-<slug>`), dispatches agents, and tracks progress in the
+control plane. Your repo's `main` branch is never touched until you explicitly approve.
+
+### Watch progress
+
+```bash
+orchctl list                     # see all tasks and their status
+orchctl show TASK-001            # full detail: inputs, outputs, validators, last run
+```
+
+### Review and merge
+
+When tasks complete, run the interactive review loop:
+
+```bash
+orchctl review --repo $SANDBOX_REPO_PATH
+```
+
+For each completed task it:
+1. Runs the assigned validators (ruff, pytest, mypy, etc.) on the agent's branch
+2. Shows per-check results
+3. Prompts you to merge or reject
+
+Merge writes the branch into your repo's `main` and closes the task. Agents working
+on dependent tasks are unblocked automatically.
+
+You can also drive it step-by-step:
+
+```bash
+orchctl validate TASK-001 --repo $SANDBOX_REPO_PATH   # run validators manually
+orchctl merge    TASK-001 --repo $SANDBOX_REPO_PATH   # merge after you're happy
+```
+
+### What agents do to your repo
+
+- Create one branch per task: `orchestra/<task-id>-<slug>`
+- Write only to the files listed in the task's `outputs` (enforced by a capability token)
+- Commit to their branch; never push to `main` directly
+- Append a summary entry to `WORKLOG.md` on merge
+
+Nothing lands in `main` without your explicit `orchctl merge` (or `/orcui` approval).
+
+### Switching projects
+
+```bash
+export SANDBOX_REPO_PATH=/path/to/other-project
+orchctl doctor      # verify the new target is a git repo and services are healthy
+orchctl request "..."
+```
+
+Tasks from the previous project remain in the control plane under their original path.
+Each project gets its own task namespace derived from `SANDBOX_REPO_PATH`.
+
 ## Agent backends
 
 Orchestra is agent-agnostic. Any CLI-based LLM can act as a worker, planner, or
