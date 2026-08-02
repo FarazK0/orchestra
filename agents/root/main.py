@@ -4,8 +4,8 @@ The root agent subscribes to the ``root:requests`` Redis stream.  When a change
 request arrives (submitted via ``orchctl request``), it:
 
   1. Iteratively explores the managed repo to build focused planning context.
-  2. Calls the planner (claude CLI or LLM, depending on AGENT_TYPE) to decompose
-     the change into tasks.
+  2. Calls the configured planner backend (see permissions/backends.yaml or
+     PLANNER_BACKEND env var) to decompose the change into tasks.
   3. Creates the tasks in the orchestrator.
   4. Transitions root tasks (no depends_on) to ``assigned`` so the dispatcher
      picks them up immediately.
@@ -32,6 +32,7 @@ import httpx
 import typer
 from dotenv import load_dotenv
 
+from agents.shared.cli_runner import get_backend, load_backends, run_cli_prompt
 from agents.planner.plan_utils import (
     CHANGE_REQUEST_SYSTEM_PROMPT,
     build_snapshot,
@@ -122,7 +123,7 @@ def _list_repo_files(repo_path: Path) -> list[str]:
 def _discover_context(
     repo_path: Path,
     description: str,
-    agent_type: str,
+    agent_type: str = "",
     max_iterations: int = 3,
 ) -> tuple[str, list[str]]:
     """Iterative LLM-based file discovery before planning.
@@ -163,8 +164,9 @@ def _discover_context(
 
         raw = ""
         try:
-            use_api = agent_type == "python" and os.getenv("ANTHROPIC_API_KEY", "").strip()
-            if use_api:
+            _planner_backend = get_backend("planner")
+            _planner_cfg = load_backends().get(_planner_backend, {})
+            if _planner_cfg.get("type") == "python":
                 llm = LLMClient()
                 response = llm.call(
                     messages=[{"role": "user", "content": prompt}],
@@ -175,23 +177,7 @@ def _discover_context(
                 )
                 raw = response.content[0].text
             else:
-                claude_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-                proc = subprocess.run(
-                    ["claude", "--dangerously-skip-permissions", "-p", "-"],
-                    input=prompt,
-                    env=claude_env,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-                if proc.returncode != 0:
-                    log.warning(
-                        "Discovery iteration %d: claude exited %d; stopping",
-                        iteration + 1,
-                        proc.returncode,
-                    )
-                    break
-                raw = proc.stdout
+                raw = run_cli_prompt(_planner_backend, prompt, timeout=60)
         except Exception as exc:
             log.warning("Discovery iteration %d failed: %s", iteration + 1, exc)
             break
@@ -355,14 +341,20 @@ def _fetch_existing_tasks(orch_url: str) -> str:
     return "\n\n".join(sections)
 
 
-def _decompose_with_claude(
+def _decompose(
     description: str,
     spec_content: str,
     snapshot: str,
     existing_tasks: str,
     capabilities: str = "",
 ) -> str:
-    """Call the claude CLI to decompose a change request. Returns raw text."""
+    """Decompose a change request using the configured planner backend."""
+    backend_name = get_backend("planner")
+    backend_cfg = load_backends().get(backend_name, {})
+    if backend_cfg.get("type") == "python":
+        return _decompose_with_llm(
+            description, spec_content, snapshot, existing_tasks, capabilities
+        )
     prompt = f"{CHANGE_REQUEST_SYSTEM_PROMPT}\n\n## Project state\n\n{snapshot}\n\n"
     if capabilities:
         prompt += f"\n{capabilities}\n\n"
@@ -371,19 +363,7 @@ def _decompose_with_claude(
     prompt += f"## Change request\n\n{description}\n"
     if spec_content:
         prompt += f"\n## Additional spec\n\n{spec_content}\n"
-
-    claude_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
-    result = subprocess.run(
-        ["claude", "--dangerously-skip-permissions", "-p", "-"],
-        input=prompt,
-        env=claude_env,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"claude CLI exited {result.returncode}: {result.stderr[:500]}")
-    return result.stdout
+    return run_cli_prompt(backend_name, prompt, timeout=300)
 
 
 def _decompose_with_llm(
@@ -420,11 +400,6 @@ def _decompose_with_llm(
 
 
 _ROLE_DESCRIPTIONS: dict[str, str] = {
-    "claude-code-agent": (
-        "You are the generalist engineer for this project. "
-        "You read existing code before writing, follow established patterns, and keep changes minimal. "
-        "You handle any layer (backend, frontend, tests) as needed per task."
-    ),
     "backend-agent": (
         "You are the backend specialist for this project. "
         "You own API routes, DB models, and business logic. "
@@ -925,7 +900,6 @@ class RootAgent:
             stream_key=ROOT_STREAM_KEY,
         )
         self._root_publisher: StreamPublisher | None = None
-        self._agent_type = os.getenv("AGENT_TYPE", "claude-code")
         self._tick = 0
 
     # ------------------------------------------------------------------
@@ -984,15 +958,9 @@ class RootAgent:
         snapshot = build_snapshot(self._repo)
         existing = _fetch_existing_tasks(self._orch_url)
         capabilities = _fetch_agent_capabilities(self._orch_url)
-        use_api = self._agent_type == "python" and os.getenv("ANTHROPIC_API_KEY", "").strip()
 
         try:
-            if use_api:
-                raw = _decompose_with_llm(replan_description, "", snapshot, existing, capabilities)
-            else:
-                raw = _decompose_with_claude(
-                    replan_description, "", snapshot, existing, capabilities
-                )
+            raw = _decompose(replan_description, "", snapshot, existing, capabilities)
         except Exception as exc:
             log.warning("Replan: decomposition failed: %s", exc)
             return
@@ -1010,7 +978,8 @@ class RootAgent:
 
         log.info("Replan: adding %d new task(s)", len(plan))
         change_id = str(uuid.uuid4())
-        _replan_llm = LLMClient() if use_api else None
+        _has_api = bool(os.getenv("ANTHROPIC_API_KEY", "").strip())
+        _replan_llm = LLMClient() if _has_api else None
         try:
             new_task_ids = _submit_tasks(
                 plan,
@@ -1049,7 +1018,7 @@ class RootAgent:
     def start(self) -> None:
         self._consumer.ensure_group()
         log.info(
-            "Root agent started on stream %s (agent_type=%s)", ROOT_STREAM_KEY, self._agent_type
+            "Root agent started on stream %s (planner=%s)", ROOT_STREAM_KEY, get_backend("planner")
         )
         while True:
             self._consumer.reclaim_pending()
@@ -1099,7 +1068,7 @@ class RootAgent:
                 log.warning("spec_path %r not found in repo; ignoring", spec_path_str)
 
         # Iterative file discovery: show full tree, LLM requests relevant files.
-        snapshot, discovered_inputs = _discover_context(self._repo, description, self._agent_type)
+        snapshot, discovered_inputs = _discover_context(self._repo, description)
         log.info(
             "Discovery complete: read %d file(s), snapshot %d chars",
             len(discovered_inputs),
@@ -1116,17 +1085,9 @@ class RootAgent:
         if capabilities:
             log.info("Injecting agent capabilities into planner (%d chars)", len(capabilities))
 
-        # Decompose into tasks.
-        use_api = self._agent_type == "python" and os.getenv("ANTHROPIC_API_KEY", "").strip()
+        # Decompose into tasks using the configured planner backend.
         try:
-            if use_api:
-                raw = _decompose_with_llm(
-                    description, spec_content, snapshot, existing_tasks, capabilities
-                )
-            else:
-                raw = _decompose_with_claude(
-                    description, spec_content, snapshot, existing_tasks, capabilities
-                )
+            raw = _decompose(description, spec_content, snapshot, existing_tasks, capabilities)
         except Exception as exc:
             log.error("Decomposition failed for change [%s]: %s", change_id, exc)
             return
@@ -1159,7 +1120,7 @@ class RootAgent:
                 snapshot=snapshot,
                 description=description,
                 repo_path=self._repo,
-                llm_client=LLMClient() if use_api else None,
+                llm_client=LLMClient() if os.getenv("ANTHROPIC_API_KEY", "").strip() else None,
             )
             log.info("Dispatched %d tasks for change [%s]: %s", len(task_ids), change_id, task_ids)
         except Exception as exc:

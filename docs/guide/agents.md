@@ -7,12 +7,20 @@ avoids confusion when reading task output or choosing agent identities.
 
 ## Two-layer model
 
-**Layer 1 — Execution backend** (set once at platform level via `AGENT_TYPE`):
+**Layer 1 — Execution backend** (configured via `permissions/backends.yaml`, env vars, or `orchctl config`):
 
-| `AGENT_TYPE` | What runs | Credential needed |
+| Backend | What runs | Credential needed |
 |---|---|---|
-| `claude-code` (default) | `agents.claude_code.main` — launches the `claude` CLI subprocess | `claude login` (no API key) |
-| `python` | Identity-specific Python loop per task | `ANTHROPIC_API_KEY` in `.env` |
+| `claude-code` (default) | `agents.worker.main` — launches the `claude` CLI subprocess | `claude login` (no API key) |
+| `gemini` | `agents.worker.main` — launches the `gemini` CLI subprocess | gemini CLI auth |
+| `python-api` | Identity-specific Python loop per task | `ANTHROPIC_API_KEY` in `.env` |
+
+Configure per component:
+```
+WORKER_BACKEND=claude-code    # or PLANNER_BACKEND, VALIDATOR_BACKEND
+orchctl config set worker-backend gemini
+orchctl backend list          # see all registered backends + availability
+```
 
 **Layer 2 — Agent identity** (set per task via `task.owner`):
 
@@ -26,62 +34,75 @@ Recommended identities and their specialisations:
 | `backend-agent` | APIs, data models, business logic, migrations, server tests |
 | `frontend-agent` | HTML, CSS, JS, templates, browser interaction |
 | `qa-agent` | Test plans, QA reports, risk assessment (no implementation) |
-| *(any string)* | Arbitrary specialisation — the identity system accepts any value and seeds context from accumulated memories |
+| `devops-agent` | Infrastructure, CI/CD, deployment, cloud (AWS, Terraform, GH Actions) |
+| *(any string)* | Arbitrary specialisation — any owner string creates a new identity that probes its own tools on first run |
 
-**These two concerns are independent.** `AGENT_TYPE` never changes per task. `task.owner`
+**These two concerns are independent.** Backend config never changes per task. `task.owner`
 never changes which execution backend runs.
 
 ### Dispatch table
 
-| `task.owner` | `AGENT_TYPE=claude-code` (default) | `AGENT_TYPE=python` |
+| `task.owner` | CLI backend (default) | `python-api` backend |
 |---|---|---|
-| `backend-agent` | `agents.claude_code.main` (backend identity) | `agents.backend.main` |
-| `frontend-agent` | `agents.claude_code.main` (frontend identity) | `agents.frontend.main` |
-| `qa-agent` | `agents.claude_code.main` (QA identity) | `agents.qa.main` |
-| *(any other string)* | `agents.claude_code.main` (identity from memory) | `agents.backend.main`† |
-| `claude-code-agent`‡ | `agents.claude_code.main` (no domain identity) | `agents.claude_code.main` |
+| `backend-agent` | `agents.worker.main` (backend identity) | `agents.backend.main` |
+| `frontend-agent` | `agents.worker.main` (frontend identity) | `agents.frontend.main` |
+| `qa-agent` | `agents.worker.main` (QA identity) | `agents.qa.main` |
+| *(any other string)* | `agents.worker.main` (identity from memory) | `agents.backend.main`† |
 
-†Unknown identities in python mode fall back to `agents.backend.main` as a placeholder.
+†Unknown identities in python-api mode fall back to `agents.backend.main` as a placeholder.
 A generic Python agent loop that handles arbitrary identities is future work (shelved).
-
-‡`claude-code-agent` is a technical escape hatch — it always routes to the claude CLI
-and injects no domain specialisation. Do not use it as a task identity in new plans;
-assign a domain identity instead.
 
 ---
 
 ## Execution backends
 
-### Claude Code backend (default)
+### CLI worker backend (default)
 
-Launched when `AGENT_TYPE=claude-code` (or unset). The `agents.claude_code.main` module
-builds a rich system prompt from the context package and runs:
+Launched for any CLI-type backend. `agents.worker.main` builds a rich system prompt
+from the context package and invokes the configured CLI:
 
 ```
 Dispatcher
-  └─► python -m agents.claude_code.main
+  └─► python -m agents.worker.main
         --context /tmp/orchestra/runs/<run_id>.json
         --run-id <uuid>
         [--repo PATH] [--gateway-url URL] [--orchestrator-url URL]
-        └─► subprocess: claude --dangerously-skip-permissions -p "<prompt>"
+        └─► subprocess: <backend_command> (e.g. claude --dangerously-skip-permissions -p -)
+```
+
+Configure backends in `permissions/backends.yaml`:
+```yaml
+backends:
+  claude-code:
+    type: cli
+    command: ["claude", "--dangerously-skip-permissions", "-p", "-"]
+    input: stdin
+  gemini:
+    type: cli
+    command: ["gemini", "-p", "-"]
+    input: stdin
+defaults:
+  worker: claude-code
+  planner: claude-code
+  validator: claude-code
 ```
 
 **Pros**
-- No `ANTHROPIC_API_KEY` needed in `.env`
-- Uses the same `claude` session you are already authenticated with
-- Full Claude Code toolset available inside the agent (web search, MCP, etc.)
+- No `ANTHROPIC_API_KEY` needed (for claude-code)
+- Any CLI-based LLM agent can be used
+- Full CLI toolset available inside the agent
 
 **Cons**
 - Individual file writes are not separately audited through the gateway (branch creation
   and git commit still go through the gateway)
-- Token/cost accounting is in the Claude Code billing dashboard, not in Orchestra's `runs` table
+- Token/cost accounting is in the CLI tool's billing, not in Orchestra's `runs` table
 
 ---
 
 ### Python loop backend
 
-Launched when `AGENT_TYPE=python`. Custom Python loops that call the Anthropic API
-directly through `agents/shared/llm.py`.
+Launched when backend type is `python` (i.e. `WORKER_BACKEND=python-api`). Custom Python
+loops that call the Anthropic API directly through `agents/shared/llm.py`.
 
 ```
 Dispatcher
@@ -104,7 +125,7 @@ The agent loop in `agents/shared/loop.py`:
 
 **Cons**
 - Requires `ANTHROPIC_API_KEY` in `.env`
-- Smaller effective toolset than the Claude Code CLI
+- Smaller effective toolset than the CLI backends
 
 ---
 
@@ -147,7 +168,7 @@ to the paths in `task.outputs` only. The gateway verifies this token on every re
 ## Agent tools (gateway API)
 
 Agents call the gateway via HTTP. Python loop agents receive these as Anthropic tool
-definitions; the claude-code backend has gateway tools available through MCP.
+definitions; CLI backends have gateway tools available through curl in their prompt.
 
 | Tool | Endpoint | What it does |
 |------|----------|-------------|
@@ -195,10 +216,29 @@ package. Agents can also search their own memories mid-task via `memory_search`.
 
 ## Adding a custom agent
 
+To add a new CLI-based backend:
+
+1. Add an entry to `permissions/backends.yaml`:
+   ```yaml
+   backends:
+     my-agent:
+       type: cli
+       command: ["my-agent-cli", "--yes", "-"]
+       input: stdin
+   ```
+   Or use: `orchctl backend add my-agent --command "my-agent-cli --yes -" --input stdin`
+
+2. Set it as the worker backend:
+   ```
+   orchctl config set worker-backend my-agent
+   ```
+
+To add a new Python loop agent:
+
 1. Create `agents/myagent/main.py` with the same `--context`, `--run-id`, `--repo`,
    `--gateway-url`, `--orchestrator-url` interface.
 2. Register the module in `_AGENT_MODULES` in `orchestrator/orchestrator/dispatcher.py`.
-3. Use `--owner myagent` when creating tasks.
+3. Set `WORKER_BACKEND=python-api` and use `--owner myagent` when creating tasks.
 
 The agent must:
 - Read the context package from the `--context` path

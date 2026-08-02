@@ -1,0 +1,26 @@
+# Agent backend registry for Orchestra.
+#
+# Each entry defines a named backend that can be used for worker, planner,
+# and validator components. Select the active backend per component via env
+# vars (WORKER_BACKEND, PLANNER_BACKEND, VALIDATOR_BACKEND) or via
+# `orchctl config set worker-backend <name>`.
+
+backends:
+  claude-code:
+    type: cli
+    # The claude CLI drops ANTHROPIC_API_KEY automatically and uses session auth.
+    command: ["claude", "--dangerously-skip-permissions", "-p", "-"]
+    input: stdin  # stdin | arg | file
+
+  gemini:
+    type: cli
+    command: ["gemini", "-p", "-"]
+    input: stdin
+
+  python-api:
+    type: python  # uses agents/shared/llm.py LLMClient; requires ANTHROPIC_API_KEY
+
+defaults:
+  worker: claude-code
+  planner: claude-code
+  validator: claude-code

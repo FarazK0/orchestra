@@ -1,4 +1,4 @@
-"""Unit tests for the claude-code-agent main module.
+"""Unit tests for the worker agent main module.
 
 These tests do not require the claude CLI, Postgres, or a running gateway.
 subprocess and httpx are mocked so the tests run offline.
@@ -108,7 +108,7 @@ def test_file_write_audit_emitted_after_commit(tmp_path):
 
         from typer.testing import CliRunner
 
-        from agents.claude_code.main import app
+        from agents.worker.main import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["--context", ctx, "--run-id", "run-abc"])
@@ -142,7 +142,7 @@ def test_emit_event_called_before_transition(tmp_path):
 
         from typer.testing import CliRunner
 
-        from agents.claude_code.main import app
+        from agents.worker.main import app
 
         runner = CliRunner()
         runner.invoke(app, ["--context", ctx, "--run-id", "run-xyz"])
@@ -208,7 +208,7 @@ def test_task_discovered_exits_cleanly_without_completion(tmp_path):
 
         from typer.testing import CliRunner
 
-        from agents.claude_code.main import app
+        from agents.worker.main import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["--context", ctx, "--run-id", "run-disc"])
@@ -260,7 +260,7 @@ def test_stdout_included_in_failure_reason(tmp_path):
 
         from typer.testing import CliRunner
 
-        from agents.claude_code.main import app
+        from agents.worker.main import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["--context", ctx, "--run-id", "run-fail-stdout"])
@@ -307,7 +307,7 @@ def test_env_limitation_routes_to_awaiting_human(tmp_path):
 
         from typer.testing import CliRunner
 
-        from agents.claude_code.main import app
+        from agents.worker.main import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["--context", ctx, "--run-id", "run-env-limit"])
@@ -372,7 +372,7 @@ def test_audit_emit_failure_is_non_fatal(tmp_path):
 
         from typer.testing import CliRunner
 
-        from agents.claude_code.main import app
+        from agents.worker.main import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["--context", ctx, "--run-id", "run-fail"])

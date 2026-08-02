@@ -24,4 +24,4 @@ Run all commands via `uv run python -m cli.main <command>`.
 - `memory show MEMORY_ID [--agent AGENT_ID]` -- show full content of one memory row (accepts 8-char UUID prefix)
 - `memory delete MEMORY_ID [--agent AGENT_ID] [--reason TEXT] [--yes]` -- delete a memory row and write an audit record
 
-Valid `--owner` / `--agent` values: `backend-agent`, `frontend-agent`, `qa-agent`, `claude-code-agent`, `shared` (shared project pool).
+Valid `--owner` / `--agent` values: `backend-agent`, `frontend-agent`, `qa-agent`, `devops-agent`, any custom identity string, or `shared` (shared project pool).

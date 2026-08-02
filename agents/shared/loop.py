@@ -191,7 +191,7 @@ GATEWAY_TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": (
                         "Agent type to run the task: backend-agent, frontend-agent, qa-agent, "
-                        "claude-code-agent, or 'human'. Use 'human' when the blocking work "
+                        "devops-agent, or 'human'. Use 'human' when the blocking work "
                         "requires credentials, external system access, or a physical action "
                         "that no agent can perform — do NOT use request_human_input for this."
                     ),

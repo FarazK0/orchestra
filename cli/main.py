@@ -1865,7 +1865,52 @@ _config_app = typer.Typer(help="Manage orchctl session configuration.")
 app.add_typer(_config_app, name="config")
 
 _CFG_PATH = Path.home() / ".config" / "orchestra" / "config"
-_VALID_BACKENDS = {"claude", "python"}
+_VALID_LLM_BACKENDS = {"claude", "python"}
+_COMPONENT_BACKEND_KEYS = {"worker_backend", "planner_backend", "validator_backend"}
+
+
+def _resolve_component_backend(component: str) -> tuple[str, str]:
+    """Return (backend_name, source) for worker/planner/validator."""
+    env_key = f"{component.upper()}_BACKEND"
+    env_val = os.getenv(env_key, "").strip()
+    if env_val:
+        return env_val, f"{env_key} env var"
+
+    cfg_key = f"{component}_backend"
+    if _CFG_PATH.exists():
+        for line in _CFG_PATH.read_text().splitlines():
+            if line.startswith(f"{cfg_key}="):
+                v = line.split("=", 1)[1].strip()
+                if v:
+                    return v, "~/.config/orchestra/config"
+
+    # Fall through to backends.yaml default
+    from agents.shared.cli_runner import _load_defaults
+
+    yaml_default = _load_defaults().get(component, "")
+    if yaml_default:
+        return yaml_default, "backends.yaml default"
+    return "claude-code", "built-in default"
+
+
+def _backend_status(backend_name: str) -> str:
+    """Return a short availability string for a backend."""
+    import shutil
+
+    from agents.shared.cli_runner import load_backends
+
+    cfg = load_backends().get(backend_name, {})
+    if cfg.get("type") == "python":
+        return (
+            "ANTHROPIC_API_KEY set"
+            if os.getenv("ANTHROPIC_API_KEY")
+            else _r("ANTHROPIC_API_KEY not set")
+        )
+    cmd = cfg.get("command", [])
+    if cmd and shutil.which(cmd[0]):
+        return "available"
+    exe = cmd[0] if cmd else backend_name
+    return _r(f"not found ({exe})")
 
 
 @_config_app.command("show")
@@ -1873,54 +1918,92 @@ def config_show() -> None:
     """Show current orchctl configuration and backend availability."""
     import shutil
 
-    # Determine backend and source
+    from agents.shared.cli_runner import load_backends
+
+    typer.echo()
+
+    # ── Component backends ──────────────────────────────────────────────────
+    typer.echo("  ── Backend configuration ─────────────────────────────────────────")
+    for comp in ("worker", "planner", "validator"):
+        name, source = _resolve_component_backend(comp)
+        status = _backend_status(name)
+        typer.echo(f"  {comp:<9} = {_b(name):<20}  (source: {source})  {status}")
+    typer.echo()
+
+    # ── CLI tool (orchctl ask / session) ────────────────────────────────────
+    typer.echo("  ── CLI tool (orchctl ask / session) ──────────────────────────────")
     env_val = os.getenv("ORCHESTRA_LLM_BACKEND", "").lower()
-    if env_val in _VALID_BACKENDS:
-        backend, source = env_val, "ORCHESTRA_LLM_BACKEND env var"
+    if env_val in _VALID_LLM_BACKENDS:
+        llm_backend, llm_source = env_val, "ORCHESTRA_LLM_BACKEND env var"
     else:
         file_val = ""
         if _CFG_PATH.exists():
             for line in _CFG_PATH.read_text().splitlines():
                 if line.startswith("llm_backend="):
                     file_val = line.split("=", 1)[1].strip().lower()
-        if file_val in _VALID_BACKENDS:
-            backend, source = file_val, "~/.config/orchestra/config"
+        if file_val in _VALID_LLM_BACKENDS:
+            llm_backend, llm_source = file_val, "~/.config/orchestra/config"
         else:
-            backend, source = "claude", "default"
-
-    typer.echo(f"\n  llm_backend = {_b(backend)}  ({source})\n")
-    # Claude availability
+            llm_backend, llm_source = "claude", "default"
+    typer.echo(f"  llm_backend = {_b(llm_backend)}  ({llm_source})")
     claude_ok = bool(shutil.which("claude"))
     typer.echo(
-        f"  claude CLI   : {'available' if claude_ok else _r('not found — run: claude login')}"
+        f"  claude CLI  : {'available' if claude_ok else _r('not found — run: claude login')}"
     )
-    # Python LLMClient availability
     api_key_set = bool(os.getenv("ANTHROPIC_API_KEY"))
     typer.echo(
-        f"  python LLM   : {'ANTHROPIC_API_KEY set' if api_key_set else _r('ANTHROPIC_API_KEY not set')}"
+        f"  python LLM  : {'ANTHROPIC_API_KEY set' if api_key_set else _r('ANTHROPIC_API_KEY not set')}"
     )
+
+    # ── All registered backends ──────────────────────────────────────────────
+    typer.echo()
+    typer.echo("  ── Available backends ────────────────────────────────────────────")
+    backends = load_backends()
+    for name, cfg in backends.items():
+        status = _backend_status(name)
+        b_type = cfg.get("type", "cli")
+        cmd_str = " ".join(cfg.get("command", [])) if b_type == "cli" else "(Anthropic API)"
+        typer.echo(f"  {name:<18}  {b_type:<8}  {cmd_str:<50}  {status}")
+    typer.echo()
+    typer.echo("  (run 'orchctl backend list' for details, 'orchctl backend add' to register)")
     typer.echo()
 
 
 @_config_app.command("set")
 def config_set(
-    key: str = typer.Argument(..., help="Config key, e.g. llm-backend"),
-    value: str = typer.Argument(..., help="Value, e.g. claude or python"),
+    key: str = typer.Argument(..., help="Config key, e.g. worker-backend, planner-backend"),
+    value: str = typer.Argument(..., help="Value, e.g. claude-code or python-api"),
 ) -> None:
     """Set a configuration value (saved to ~/.config/orchestra/config)."""
     key = key.lower().replace("-", "_")
-    value = value.lower()
+    value = value.strip()
 
     if key == "llm_backend":
-        if value not in _VALID_BACKENDS:
+        value = value.lower()
+        if value not in _VALID_LLM_BACKENDS:
             typer.echo(f"Error: invalid backend {value!r} — choose 'claude' or 'python'.", err=True)
             raise typer.Exit(1)
+    elif key in _COMPONENT_BACKEND_KEYS:
+        from agents.shared.cli_runner import load_backends
+
+        backends = load_backends()
+        if value not in backends:
+            typer.echo(
+                f"Error: backend {value!r} not found in permissions/backends.yaml.\n"
+                f"Run 'orchctl backend list' to see available backends, or "
+                f"'orchctl backend add' to register one.",
+                err=True,
+            )
+            raise typer.Exit(1)
     else:
-        typer.echo(f"Error: unknown config key {key!r}.", err=True)
+        typer.echo(
+            f"Error: unknown config key {key!r}. "
+            f"Valid keys: llm-backend, worker-backend, planner-backend, validator-backend.",
+            err=True,
+        )
         raise typer.Exit(1)
 
     _CFG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    # Read existing lines, update or append
     lines: list[str] = []
     if _CFG_PATH.exists():
         lines = _CFG_PATH.read_text().splitlines()
@@ -1939,6 +2022,124 @@ def config_set(
 
 def _is_human_taught(key: str) -> bool:
     return any(key.startswith(p) for p in _HUMAN_TAUGHT_PREFIXES)
+
+
+# ---------------------------------------------------------------------------
+# backend sub-app
+# ---------------------------------------------------------------------------
+
+_backend_app = typer.Typer(help="Manage agent CLI backends.")
+app.add_typer(_backend_app, name="backend")
+
+_BACKENDS_YAML_PATH = Path(__file__).parent.parent / "permissions" / "backends.yaml"
+
+
+@_backend_app.command("list")
+def backend_list() -> None:
+    """List all registered backends and their availability."""
+    import shutil
+
+    import yaml
+
+    data: dict = {}
+    if _BACKENDS_YAML_PATH.exists():
+        data = yaml.safe_load(_BACKENDS_YAML_PATH.read_text()) or {}
+    backends: dict = data.get("backends", {})
+    defaults: dict = data.get("defaults", {})
+
+    typer.echo()
+    header = f"  {'NAME':<18}  {'TYPE':<8}  {'COMMAND':<50}  STATUS"
+    typer.echo(header)
+    typer.echo("  " + "─" * (len(header) - 2))
+    for name, cfg in backends.items():
+        b_type = cfg.get("type", "cli")
+        if b_type == "python":
+            cmd_str = "(Anthropic API via LLMClient)"
+            status = (
+                "available (ANTHROPIC_API_KEY set)"
+                if os.getenv("ANTHROPIC_API_KEY")
+                else _r("ANTHROPIC_API_KEY not set")
+            )
+        else:
+            cmd = cfg.get("command", [])
+            cmd_str = " ".join(cmd)
+            exe = cmd[0] if cmd else name
+            status = "available" if shutil.which(exe) else _r(f"not found ({exe})")
+        typer.echo(f"  {name:<18}  {b_type:<8}  {cmd_str:<50}  {status}")
+
+    typer.echo()
+    default_str = "  ".join(f"{k}={v}" for k, v in defaults.items())
+    typer.echo(f"  Defaults:  {default_str}")
+    typer.echo()
+
+
+@_backend_app.command("add")
+def backend_add(
+    name: str = typer.Argument(..., help="Backend name, e.g. aider"),
+    command: str = typer.Option(
+        None, "--command", "-c", help="CLI command string, e.g. 'aider --yes-always -'"
+    ),
+    input_mode: str = typer.Option("stdin", "--input", "-i", help="Input mode: stdin | arg | file"),
+) -> None:
+    """Register a new CLI backend in permissions/backends.yaml."""
+    import yaml
+
+    data: dict = {}
+    if _BACKENDS_YAML_PATH.exists():
+        data = yaml.safe_load(_BACKENDS_YAML_PATH.read_text()) or {}
+    backends: dict = data.setdefault("backends", {})
+
+    if name in backends:
+        typer.echo(f"Backend '{name}' already exists. Edit permissions/backends.yaml to update it.")
+        raise typer.Exit(1)
+
+    if not command:
+        typer.echo(f"\nAdding backend '{name}'")
+        command = typer.prompt("  Command (e.g. 'gemini -p -')")
+        input_mode = typer.prompt("  Input mode [stdin/arg/file]", default="stdin")
+
+    cmd_parts = command.split()
+    if input_mode not in ("stdin", "arg", "file"):
+        typer.echo(f"Error: input mode must be stdin, arg, or file (got {input_mode!r}).", err=True)
+        raise typer.Exit(1)
+
+    backends[name] = {"type": "cli", "command": cmd_parts, "input": input_mode}
+    _BACKENDS_YAML_PATH.write_text(yaml.dump(data, sort_keys=False, default_flow_style=False))
+    typer.echo(f"\n  Added backend '{name}' to permissions/backends.yaml.")
+    typer.echo(f"  Test it with: orchctl config set worker-backend {name}\n")
+
+
+@_backend_app.command("remove")
+def backend_remove(
+    name: str = typer.Argument(..., help="Backend name to remove"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
+) -> None:
+    """Remove a backend from permissions/backends.yaml."""
+    import yaml
+
+    data: dict = {}
+    if _BACKENDS_YAML_PATH.exists():
+        data = yaml.safe_load(_BACKENDS_YAML_PATH.read_text()) or {}
+    backends: dict = data.get("backends", {})
+
+    if name not in backends:
+        typer.echo(f"Backend '{name}' not found in permissions/backends.yaml.", err=True)
+        raise typer.Exit(1)
+
+    defaults: dict = data.get("defaults", {})
+    in_use = [k for k, v in defaults.items() if v == name]
+    if in_use:
+        typer.echo(
+            f"Warning: backend '{name}' is the default for: {', '.join(in_use)}. "
+            "Update the defaults section in backends.yaml after removing."
+        )
+
+    if not yes:
+        typer.confirm(f"Remove backend '{name}'?", abort=True)
+
+    del backends[name]
+    _BACKENDS_YAML_PATH.write_text(yaml.dump(data, sort_keys=False, default_flow_style=False))
+    typer.echo(f"  Removed backend '{name}' from permissions/backends.yaml.")
 
 
 def _build_session_prompt(agent_id: str, memories: list[dict]) -> str:
@@ -2247,7 +2448,7 @@ def identities(
 
 @app.command("teach")
 def teach(
-    agent_id: str = typer.Argument(..., help="Agent ID, e.g. claude-code-agent."),
+    agent_id: str = typer.Argument(..., help="Agent ID, e.g. backend-agent."),
     fact: str = typer.Argument(..., help="Skill or fact to record."),
     topic: str = typer.Option(
         "general", "--topic", "-t", help="Short topic slug (e.g. db-pattern)."
@@ -2280,7 +2481,7 @@ def teach(
 
 @app.command("forget")
 def forget(
-    agent_id: str = typer.Argument(..., help="Agent ID, e.g. claude-code-agent."),
+    agent_id: str = typer.Argument(..., help="Agent ID, e.g. backend-agent."),
     topic_or_id: str = typer.Argument(..., help="Topic slug or 8-char memory ID."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt."),
 ) -> None:

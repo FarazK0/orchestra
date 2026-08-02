@@ -1,5 +1,19 @@
 # CLAUDE.md — Orchestra (Human-Centric Multi-Agent Orchestration Platform)
 
+## Session startup
+
+At the start of every session, `scripts/check-services.sh` runs automatically via a
+`UserPromptSubmit` hook (`.claude/settings.json`). It checks orchestrator, gateway, and
+dispatcher in ~50ms and runs `scripts/start-session.sh` only if something is down.
+
+If you notice services are down mid-session (e.g. a task fails with connection errors),
+run `bash scripts/check-services.sh` or `bash scripts/start-session.sh` to recover.
+
+Tasks that are `awaiting_human` due to an env_limitation (spend limit, auth failure) need:
+1. Resolve the issue (raise spend limit at claude.ai/settings/usage, or `claude login`)
+2. `curl -s -X POST http://localhost:8080/tasks/TASK-XXX/respond -H 'Content-Type: application/json' -d '{"response": "resolved", "actor": "human"}'`
+3. Re-run the agent manually (dispatcher does not auto-resume awaiting_human tasks)
+
 ## What this project is
 
 An orchestration platform where a human owns intent, AI agents own execution, and the
@@ -92,9 +106,10 @@ orchestra/
 │   ├── gateway/               #   sandboxed run_command (docker, no network)
 │   └── tests/
 ├── agents/
-│   ├── shared/                # LLM client wrapper (token/cost logging), agent base loop
+│   ├── shared/                # LLM client wrapper, agent base loop, cli_runner (backend config)
 │   ├── root/                  # persistent root agent: accepts change requests, dispatches tasks
 │   ├── planner/               # one-shot planner: spec -> tasks (plan_utils.py shared with root)
+│   ├── worker/                # generic CLI worker wrapper (replaces claude_code/; configurable backend)
 │   └── backend/               # Phase 1 backend agent (prompt + config)
 ├── schemas/                   # JSON Schemas: Task, Event, AgentIdentity, RunRecord,
 │                              #   Capability. Versioned via schema_version field.
@@ -132,6 +147,13 @@ orchestra/
   (Jaeger). Leave empty to skip tracing; Prometheus metrics are always active at `/metrics`.
 - Postgres data is persisted at `~/.orchestra/pgdata` (WSL2 bind mount, not a named
   volume) to avoid the 128 MB Docker Desktop VHD limit.
+- Agent backend config: `WORKER_BACKEND`, `PLANNER_BACKEND`, `VALIDATOR_BACKEND` env vars
+  select which CLI/API backend each component uses. See `permissions/backends.yaml` for the
+  registry; `orchctl config set worker-backend <name>` and `orchctl backend list` for UI.
+  Legacy `AGENT_TYPE=claude-code|python` is still accepted as a fallback for `WORKER_BACKEND`.
+  `owner` field on tasks is a domain identity (e.g. `backend-agent`, `devops-agent`, any
+  string) -- it is NOT an execution backend selector. Any owner string is valid; a fresh
+  identity probes its tools at first run and escalates to human if unavailable.
 
 ## Commands
 
@@ -148,7 +170,7 @@ All canonical commands live in the Makefile. Current targets:
 
 `orchctl` commands (run via `uv run orchctl`):
 - `request "description" [--spec PATH]` — submit a change request to the root agent; the root agent decomposes it into tasks and dispatches agents automatically
-- `create-task TITLE [--owner AGENT_ID] [--accept CRITERION] [--input PATH] [--output PATH] [--depends-on TASK-ID]` — create a task manually; prompts interactively to accept/edit auto-detected validators; valid `--owner` values: `backend-agent`, `frontend-agent`, `qa-agent`, `claude-code-agent`, `human`
+- `create-task TITLE [--owner AGENT_ID] [--accept CRITERION] [--input PATH] [--output PATH] [--depends-on TASK-ID]` — create a task manually; prompts interactively to accept/edit auto-detected validators; valid `--owner` values: `backend-agent`, `frontend-agent`, `qa-agent`, `devops-agent`, any custom identity string, or `human`
 - `list [--status STATUS]` — list tasks
 - `show TASK-ID` — full task detail: inputs, outputs, validators, acceptance criteria, and most recent validation result (works on closed tasks too)
 - `approve TASK-ID` — advance through human approval gate (created→assigned, validated→merged)
@@ -189,6 +211,7 @@ Gateway service (port 8081) — start with `uvicorn gateway.gateway.app:app --po
 
 1. **Python loop agents** (`backend-agent`, `frontend-agent`, `qa-agent`): custom Python loops
    that call the Anthropic API via `agents/shared/loop.py`. Require `ANTHROPIC_API_KEY` in `.env`.
+   Active when `WORKER_BACKEND=python-api`.
    ```
    python -m agents.backend.main \
      --context /path/to/<run_id>.json \
@@ -196,12 +219,13 @@ Gateway service (port 8081) — start with `uvicorn gateway.gateway.app:app --po
      [--repo PATH] [--gateway-url URL] [--orchestrator-url URL]
    ```
 
-2. **Claude Code agent** (`claude-code-agent`): launches the `claude` CLI as a subprocess.
-   Requires the `claude` CLI to be installed and authenticated (`claude login`). Does NOT
-   need `ANTHROPIC_API_KEY`. Branch creation and git commit still go through the gateway;
-   individual file writes are not individually audited (Phase 3 revisit).
+2. **CLI worker agent** (all owner types, default): the generic `agents.worker.main` wrapper
+   invokes any CLI-based backend (default: `claude`). Backend is configured via
+   `WORKER_BACKEND` env var or `orchctl config set worker-backend <name>`. Does NOT need
+   `ANTHROPIC_API_KEY` for the claude-code backend. Branch creation and git commit go through
+   the gateway; individual file writes are not individually audited (Phase 3 revisit).
    ```
-   python -m agents.claude_code.main \
+   python -m agents.worker.main \
      --context /path/to/<run_id>.json \
      --run-id <uuid> \
      [--repo PATH] [--gateway-url URL] [--orchestrator-url URL]

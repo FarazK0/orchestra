@@ -61,11 +61,6 @@ _DOMAIN_RULES: list[tuple] = [
 ]
 
 _AGENT_ROLES: dict[str, str] = {
-    "claude-code-agent": (
-        "You are the generalist engineer for this project. "
-        "You read existing code before writing, follow established patterns, "
-        "and keep changes minimal. You handle any layer (backend, frontend, tests) as needed."
-    ),
     "backend-agent": (
         "You are the backend specialist for this project. "
         "You implement server-side logic, APIs, data models, and database interactions."
@@ -133,19 +128,15 @@ def _merge_expertise_section(content: str, new_tags: list[str], task_id: str) ->
     return rebuilt[:2000]
 
 
-# Maps agent identity → Python module for AGENT_TYPE=python mode.
-# In claude-code mode (default), _launch_agent routes all domain identities
-# (backend-agent, frontend-agent, qa-agent, and any arbitrary string) through
-# agents.claude_code.main, ignoring this table — except for claude-code-agent,
-# which always goes here regardless of AGENT_TYPE (it is an execution-backend
-# alias, not a domain identity, so it must never be re-routed).
+# Maps agent identity → Python module for python-api backend mode.
+# In CLI backend mode (default), _launch_agent routes all domain identities
+# through agents.worker.main regardless of this table.
 # The agents.backend.main fallback for unknown identities is a placeholder;
 # a generic Python agent loop (agents.generic.main) is future work (shelved).
 _AGENT_MODULES: dict[str, str] = {
     "backend-agent": "agents.backend.main",
     "frontend-agent": "agents.frontend.main",
     "qa-agent": "agents.qa.main",
-    "claude-code-agent": "agents.claude_code.main",
 }
 
 
@@ -679,19 +670,14 @@ class Dispatcher:
             log.exception("_deferred_launch failed for run %s", run_id)
 
     def _launch_agent(self, run: Run) -> None:
-        agent_type = os.getenv("AGENT_TYPE", "claude-code")
-        # claude-code mode: route every domain identity through the claude CLI.
-        # claude-code-agent is excluded here because it is an execution-backend alias
-        # (not a domain identity) and must always fall through to _AGENT_MODULES,
-        # which maps it to agents.claude_code.main regardless of AGENT_TYPE.
-        if (
-            agent_type != "python"
-            and run.agent_id in _AGENT_MODULES
-            and run.agent_id != "claude-code-agent"
-        ):
-            module = "agents.claude_code.main"
-        else:
+        from agents.shared.cli_runner import get_backend, load_backends
+
+        backend_name = get_backend("worker")
+        backend_cfg = load_backends().get(backend_name, {})
+        if backend_cfg.get("type") == "python":
             module = _AGENT_MODULES.get(run.agent_id, "agents.backend.main")
+        else:
+            module = "agents.worker.main"
         log_path = run.log_path or str(self._store_dir / "logs" / f"{run.run_id}.log")
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         log_file = open(log_path, "w")  # noqa: SIM115

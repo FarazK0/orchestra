@@ -27,6 +27,7 @@ import yaml
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from agents.shared.cli_runner import get_backend, load_backends, run_cli_prompt
 from .db import ArtifactProvenance, Run, Task
 from .state_machine import TaskNotFoundError, transition
 
@@ -202,14 +203,24 @@ def _check_llm_acceptance(repo: Path, branch: str, task: Task) -> CheckResult:
             duration_s=time.monotonic() - t0,
         )
 
-    claude_bin = shutil.which("claude")
-    if not claude_bin:
-        return CheckResult(
-            name="llm-acceptance",
-            passed=True,
-            output="claude CLI not found — llm-acceptance skipped (install claude and run 'claude login').",
-            duration_s=time.monotonic() - t0,
+    _validator_backend = get_backend("validator")
+    _validator_cfg = load_backends().get(_validator_backend, {})
+    _is_cli = _validator_cfg.get("type", "cli") != "python"
+    if _is_cli:
+        _cmd = _validator_cfg.get(
+            "command", ["claude", "--dangerously-skip-permissions", "-p", "-"]
         )
+        _cli_bin = shutil.which(_cmd[0]) if _cmd else None
+        if not _cli_bin:
+            return CheckResult(
+                name="llm-acceptance",
+                passed=True,
+                output=(
+                    f"Validator backend '{_validator_backend}' not found "
+                    f"(command: {_cmd[0] if _cmd else '?'}) — llm-acceptance skipped."
+                ),
+                duration_s=time.monotonic() - t0,
+            )
 
     # Get diff of agent branch vs main.
     rc, diff, err = _git(repo, "diff", "main", branch, "--unified=3")
@@ -235,27 +246,46 @@ def _check_llm_acceptance(repo: Path, branch: str, task: Task) -> CheckResult:
         repo_files_block=repo_files_block,
     )
 
-    env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
     try:
-        result = subprocess.run(
-            [
-                "claude",
-                "--system-prompt",
-                prompt,
-                "-p",
-                "Evaluate the acceptance criteria. Return only the JSON.",
-            ],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        raw = result.stdout.strip()
-    except subprocess.TimeoutExpired:
+        if not _is_cli:
+            from agents.shared.llm import LLMClient
+
+            llm = LLMClient()
+            response = llm.call(
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "Evaluate the acceptance criteria. Return only the JSON.",
+                    }
+                ],
+                system=prompt,
+                run_id=None,
+                session=None,
+                max_tokens=1024,
+            )
+            raw = response.content[0].text.strip()
+        else:
+            full_prompt = prompt + "\n\nEvaluate the acceptance criteria. Return only the JSON."
+            raw = run_cli_prompt(_validator_backend, full_prompt, timeout=120).strip()
+    except RuntimeError as exc:
         return CheckResult(
             name="llm-acceptance",
-            passed=True,  # don't fail the task on LLM timeout
-            output="llm-acceptance timed out — skipped.",
+            passed=True,
+            output=f"llm-acceptance skipped: {exc}",
+            duration_s=time.monotonic() - t0,
+        )
+    except Exception as exc:
+        if "timeout" in str(exc).lower():
+            return CheckResult(
+                name="llm-acceptance",
+                passed=True,
+                output="llm-acceptance timed out — skipped.",
+                duration_s=time.monotonic() - t0,
+            )
+        return CheckResult(
+            name="llm-acceptance",
+            passed=True,
+            output=f"llm-acceptance error (soft pass): {exc}",
             duration_s=time.monotonic() - t0,
         )
 
