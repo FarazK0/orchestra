@@ -40,8 +40,10 @@ make setup         # interactive: creates .env from .env.example if missing,
                    # dispatcher + root agent
 ```
 
-`make setup` handles `.env` for you — you only need to edit it manually if you want to
-change defaults (e.g. swap database credentials or set `ANTHROPIC_API_KEY` upfront).
+`make setup` handles `.env` for you. You only need to edit it manually to change
+defaults such as database credentials. CLI agent backends (`claude`, `gemini`, etc.)
+authenticate via their own login flow — not through `.env`. Only the `python-api`
+backend needs `ANTHROPIC_API_KEY` there, and `make setup` prompts for it if required.
 
 Verify everything is healthy:
 
