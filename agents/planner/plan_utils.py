@@ -41,6 +41,11 @@ that reflects the domain specialisation the agent brings to the work:
                      access (AWS console, GitHub UI, DNS registrar), physical action, or
                      out-of-band approval. Human tasks block successors in the DAG exactly
                      like agent tasks.
+  <any string>    -- A specialised agent identity whose capabilities have been established
+                     by prior experience. Use when "Agent capabilities" lists an identity
+                     with the tools the task needs (e.g. "devops-agent" with aws + terraform).
+                     Any owner string is valid — a fresh identity is born on its first task run
+                     and will probe its own tools, escalating to human if they are absent.
 
 The execution backend (which code actually runs the LLM loop) is a system-wide setting
 and is NOT determined by the owner field. Assign the identity whose specialisation best
@@ -56,8 +61,11 @@ Rules:
 - Use frontend-agent for client-side work (HTML, CSS, JS, UI templates).
 - Use qa-agent for test-only tasks that validate existing features, not implement them.
 - Use human when the spec explicitly describes an action only a human can perform (e.g.
-  "run aws cloudformation deploy", "set a GitHub repository variable", "trigger a workflow").
+  "set a GitHub repository variable", "trigger a workflow manually", "approve in the console").
   Do NOT create a human task for work an agent can do with the right tools.
+- If "Agent capabilities" lists a specialised identity (e.g. devops-agent) with the tools
+  a task needs (terraform, aws, gh, docker), assign that identity instead of human. The
+  agent will verify its tools at startup and escalate to human itself if they are absent.
 - For human tasks: set outputs to ["human-gate/<slug>/manifest.json"] where <slug> is a
   kebab-case version of the title. Set acceptance to a mixed list:
     1. Plain-text step instructions the human must follow (imperative sentences, each a

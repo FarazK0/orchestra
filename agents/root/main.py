@@ -276,6 +276,38 @@ def _discover_context(
 # ---------------------------------------------------------------------------
 
 
+def _fetch_agent_capabilities(orch_url: str) -> str:
+    """Return a capabilities summary injected into the planner prompt.
+
+    Reads skill memories with key='skill/capabilities' for every known agent
+    identity so the planner can route infra/devops tasks to proven identities
+    instead of defaulting to owner=human.
+    """
+    try:
+        with httpx.Client(base_url=orch_url, timeout=10.0) as client:
+            rows = client.get(
+                "/agent-memories",
+                params={"memory_type": "skill"},
+            ).json()
+    except Exception as exc:
+        log.warning("Could not fetch agent capability memories: %s", exc)
+        return ""
+
+    if not isinstance(rows, list):
+        return ""
+
+    caps = [r for r in rows if r.get("key") == "skill/capabilities"]
+    if not caps:
+        return ""
+
+    lines = ["## Agent capabilities (use to assign owner instead of 'human')"]
+    for r in caps:
+        agent_id = r.get("agent_id", "?")
+        content = r.get("content", "").strip()
+        lines.append(f"  {agent_id}: {content}")
+    return "\n".join(lines)
+
+
 def _fetch_existing_tasks(orch_url: str) -> str:
     """Return a two-section summary of tasks: in-flight (paths locked) and landed."""
     _IN_FLIGHT = {"created", "assigned", "running", "completed", "validated"}
@@ -324,10 +356,16 @@ def _fetch_existing_tasks(orch_url: str) -> str:
 
 
 def _decompose_with_claude(
-    description: str, spec_content: str, snapshot: str, existing_tasks: str
+    description: str,
+    spec_content: str,
+    snapshot: str,
+    existing_tasks: str,
+    capabilities: str = "",
 ) -> str:
     """Call the claude CLI to decompose a change request. Returns raw text."""
     prompt = f"{CHANGE_REQUEST_SYSTEM_PROMPT}\n\n## Project state\n\n{snapshot}\n\n"
+    if capabilities:
+        prompt += f"\n{capabilities}\n\n"
     if existing_tasks:
         prompt += f"\n{existing_tasks}\n\n"
     prompt += f"## Change request\n\n{description}\n"
@@ -349,10 +387,16 @@ def _decompose_with_claude(
 
 
 def _decompose_with_llm(
-    description: str, spec_content: str, snapshot: str, existing_tasks: str
+    description: str,
+    spec_content: str,
+    snapshot: str,
+    existing_tasks: str,
+    capabilities: str = "",
 ) -> str:
     """Call the LLM API to decompose a change request. Returns raw text."""
     user_content = f"## Project state\n\n{snapshot}\n\n"
+    if capabilities:
+        user_content += f"\n{capabilities}\n\n"
     if existing_tasks:
         user_content += f"\n{existing_tasks}\n\n"
     user_content += f"## Change request\n\n{description}\n"
@@ -939,13 +983,16 @@ class RootAgent:
 
         snapshot = build_snapshot(self._repo)
         existing = _fetch_existing_tasks(self._orch_url)
+        capabilities = _fetch_agent_capabilities(self._orch_url)
         use_api = self._agent_type == "python" and os.getenv("ANTHROPIC_API_KEY", "").strip()
 
         try:
             if use_api:
-                raw = _decompose_with_llm(replan_description, "", snapshot, existing)
+                raw = _decompose_with_llm(replan_description, "", snapshot, existing, capabilities)
             else:
-                raw = _decompose_with_claude(replan_description, "", snapshot, existing)
+                raw = _decompose_with_claude(
+                    replan_description, "", snapshot, existing, capabilities
+                )
         except Exception as exc:
             log.warning("Replan: decomposition failed: %s", exc)
             return
@@ -1064,13 +1111,22 @@ class RootAgent:
         if existing_tasks:
             log.info("Injecting existing task context into planner (%d chars)", len(existing_tasks))
 
+        # Fetch agent capability memories so the planner can route to proven identities.
+        capabilities = _fetch_agent_capabilities(self._orch_url)
+        if capabilities:
+            log.info("Injecting agent capabilities into planner (%d chars)", len(capabilities))
+
         # Decompose into tasks.
         use_api = self._agent_type == "python" and os.getenv("ANTHROPIC_API_KEY", "").strip()
         try:
             if use_api:
-                raw = _decompose_with_llm(description, spec_content, snapshot, existing_tasks)
+                raw = _decompose_with_llm(
+                    description, spec_content, snapshot, existing_tasks, capabilities
+                )
             else:
-                raw = _decompose_with_claude(description, spec_content, snapshot, existing_tasks)
+                raw = _decompose_with_claude(
+                    description, spec_content, snapshot, existing_tasks, capabilities
+                )
         except Exception as exc:
             log.error("Decomposition failed for change [%s]: %s", change_id, exc)
             return
