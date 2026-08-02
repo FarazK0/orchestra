@@ -17,23 +17,51 @@ without human approval.
 - git
 - A CLI agent — `claude` (default), `gemini`, or any stdin-compatible LLM CLI
 
-## Quick start
+## Installation
+
+Clone Orchestra once to a stable location — agents will manage *other* repos, not this one:
 
 ```bash
-git clone <repo> && cd orchestra
+git clone https://github.com/your-org/orchestra ~/tools/orchestra
+cd ~/tools/orchestra
 
-# Point Orchestra at the project you want agents to work on:
-export SANDBOX_REPO_PATH=/path/to/your-project
-
-make setup        # installs deps, starts Postgres + Redis, runs migrations,
-                  # starts orchestrator + gateway + dispatcher + root agent
-                  # then hands off to Claude Code UI (or terminal, your choice)
-
-./orchctl quickstart   # print cheat-sheet (works offline, before make setup)
+# Install orchctl globally so it works from any directory:
+make install       # runs: uv tool install --editable .
 ```
 
-`./orchctl` is a zero-config wrapper — works right after `make setup` or `uv sync`.
-For a persistent global install so `orchctl` works from any directory: `make install`.
+Copy the environment template and fill in your settings:
+
+```bash
+cp .env.example .env
+# Edit .env — at minimum set:
+#   DATABASE_URL=postgresql+psycopg://orchestra:orchestra@localhost:5433/orchestra
+#   REDIS_URL=redis://localhost:6380
+#   ANTHROPIC_API_KEY=sk-...  (only needed if using python-api backend)
+```
+
+Point Orchestra at the project you want agents to work on, then start services:
+
+```bash
+export SANDBOX_REPO_PATH=/path/to/your-project   # any git repo on your machine
+
+make setup         # starts Postgres + Redis, runs migrations,
+                   # starts orchestrator + gateway + dispatcher + root agent
+```
+
+Verify everything is healthy:
+
+```bash
+orchctl doctor     # pre-flight check: services, backends, tools, SANDBOX_REPO_PATH
+```
+
+You're ready:
+
+```bash
+orchctl request "add a login endpoint"
+```
+
+`orchctl` works from any directory once globally installed. `SANDBOX_REPO_PATH` tells it
+which project to target; export it in your shell profile to make it permanent.
 
 ## Agent backends
 

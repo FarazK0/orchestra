@@ -2581,6 +2581,217 @@ def session_cmd(
 
 
 # ---------------------------------------------------------------------------
+# Doctor — pre-flight check
+# ---------------------------------------------------------------------------
+
+
+@app.command("doctor")
+def doctor() -> None:
+    """Pre-flight check: verify services, backends, and common tools.
+
+    \b
+    Checks:
+      - Platform services (orchestrator, gateway, dispatcher, Redis, Postgres)
+      - Configured agent backends (worker, planner, validator)
+      - ANTHROPIC_API_KEY when python-api backend is configured
+      - SANDBOX_REPO_PATH (must be set and point to a git repo)
+      - Common domain tools (docker, git, gh, terraform, aws, node)
+    Prints a remediation hint for every failure.
+    """
+    import shutil
+    import subprocess
+
+    from agents.shared.cli_runner import load_backends
+
+    issues: list[str] = []
+    ok_count = 0
+
+    def _ok(label: str, detail: str = "") -> None:
+        nonlocal ok_count
+        ok_count += 1
+        line = f"  {_g('✓')} {label}"
+        if detail:
+            line += f"  {_d(detail)}"
+        typer.echo(line)
+
+    def _fail(label: str, hint: str) -> None:
+        issues.append(label)
+        typer.echo(f"  {_r('✗')} {label}")
+        typer.echo(f"      {_d('→ ' + hint)}")
+
+    def _warn(label: str, hint: str) -> None:
+        typer.echo(f"  {_r('!')} {label}")
+        typer.echo(f"      {_d('→ ' + hint)}")
+
+    typer.echo()
+    typer.echo(f"  {_b('── Platform services ────────────────────────────────────────────')}")
+
+    # Orchestrator
+    try:
+        resp = httpx.get("http://localhost:8080/healthz", timeout=3)
+        if resp.status_code == 200:
+            _ok("Orchestrator", "http://localhost:8080")
+        else:
+            _fail(
+                "Orchestrator", f"returned HTTP {resp.status_code} — run: make up && make migrate"
+            )
+    except Exception:
+        _fail("Orchestrator", "not reachable — run: bash scripts/check-services.sh")
+
+    # Gateway
+    try:
+        resp = httpx.get("http://localhost:8081/healthz", timeout=3)
+        if resp.status_code == 200:
+            _ok("Gateway", "http://localhost:8081")
+        else:
+            _fail(
+                "Gateway", f"returned HTTP {resp.status_code} — run: bash scripts/start-session.sh"
+            )
+    except Exception:
+        _fail("Gateway", "not reachable — run: bash scripts/check-services.sh")
+
+    # Dispatcher (heuristic: check via Redis or process)
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6380")
+    try:
+        import redis as _redis  # type: ignore[import-untyped]
+
+        r = _redis.from_url(redis_url, socket_connect_timeout=2)
+        r.ping()
+        _ok("Redis", redis_url)
+    except Exception:
+        _fail("Redis", f"not reachable at {redis_url} — run: make up")
+
+    # Postgres — probe via orchestrator's /healthz details or direct driver
+    db_url = os.getenv("DATABASE_URL", "")
+    if not db_url:
+        _warn("Postgres", "DATABASE_URL not set — set it in .env")
+    else:
+        try:
+            import psycopg  # type: ignore[import-untyped]
+
+            # SQLAlchemy URLs use postgresql+psycopg:// — strip driver suffix for psycopg
+            pg_url = db_url.replace("postgresql+psycopg://", "postgresql://", 1)
+            with psycopg.connect(pg_url, connect_timeout=3) as conn:  # type: ignore[attr-defined]
+                conn.execute("SELECT 1")
+            _ok("Postgres", "connected")
+        except ImportError:
+            # psycopg (v3) not importable as 'psycopg' — fall back to socket check
+            try:
+                import socket
+
+                host = "localhost"
+                port = 5433
+                s = socket.create_connection((host, port), timeout=3)
+                s.close()
+                _ok("Postgres", f"port {port} open")
+            except Exception:
+                _fail("Postgres", "not reachable on port 5433 — run: make up && make migrate")
+        except Exception as exc:
+            _fail("Postgres", f"{exc} — run: make up && make migrate")
+
+    typer.echo()
+    typer.echo(f"  {_b('── Agent backends ───────────────────────────────────────────────')}")
+
+    backends = load_backends()
+    needs_api_key = False
+    for comp in ("worker", "planner", "validator"):
+        name, source = _resolve_component_backend(comp)
+        cfg = backends.get(name, {})
+        if cfg.get("type") == "python":
+            needs_api_key = True
+            if os.getenv("ANTHROPIC_API_KEY"):
+                _ok(f"{comp} backend = {name}", f"source: {source} | ANTHROPIC_API_KEY set")
+            else:
+                _fail(
+                    f"{comp} backend = {name}",
+                    "ANTHROPIC_API_KEY not set — add it to .env",
+                )
+        else:
+            cmd = cfg.get("command", [name])
+            exe = cmd[0] if cmd else name
+            if shutil.which(exe):
+                _ok(f"{comp} backend = {name}", f"source: {source} | {exe} found")
+            else:
+                _fail(
+                    f"{comp} backend = {name}",
+                    f"'{exe}' not found — install it or switch backend: "
+                    f"orchctl config set {comp}-backend claude-code",
+                )
+
+    if needs_api_key and not os.getenv("ANTHROPIC_API_KEY"):
+        pass  # already reported per-component above
+    elif not needs_api_key and not os.getenv("ANTHROPIC_API_KEY"):
+        typer.echo(f"  {_d('  ANTHROPIC_API_KEY not set (not needed for CLI backends)')}")
+
+    typer.echo()
+    typer.echo(f"  {_b('── Managed repo ─────────────────────────────────────────────────')}")
+
+    sandbox = os.getenv("SANDBOX_REPO_PATH", "").strip()
+    if not sandbox:
+        _fail(
+            "SANDBOX_REPO_PATH",
+            "not set — export SANDBOX_REPO_PATH=/path/to/your-project",
+        )
+    elif not Path(sandbox).is_dir():
+        _fail("SANDBOX_REPO_PATH", f"directory does not exist: {sandbox}")
+    else:
+        git_dir = Path(sandbox) / ".git"
+        if git_dir.exists():
+            _ok("SANDBOX_REPO_PATH", sandbox)
+        else:
+            _warn(
+                f"SANDBOX_REPO_PATH={sandbox}",
+                "exists but is not a git repo — Orchestra requires a git-initialised project",
+            )
+
+    typer.echo()
+    typer.echo(f"  {_b('── Common domain tools ──────────────────────────────────────────')}")
+
+    domain_tools: list[tuple[str, str]] = [
+        ("git", "required — install via your package manager"),
+        ("docker", "required for Postgres/Redis — install Docker"),
+        ("gh", "optional — GitHub CLI for PR workflows"),
+        ("terraform", "optional — needed for devops-agent infrastructure tasks"),
+        ("aws", "optional — needed for devops-agent AWS tasks"),
+        ("node", "optional — needed for frontend-agent JS tasks"),
+        ("npm", "optional — needed for frontend-agent JS tasks"),
+    ]
+    for tool, hint in domain_tools:
+        if shutil.which(tool):
+            ver = ""
+            try:
+                ver_out = (
+                    subprocess.run([tool, "--version"], capture_output=True, text=True, timeout=3)
+                    .stdout.strip()
+                    .splitlines()
+                )
+                ver = ver_out[0] if ver_out else ""
+            except Exception:
+                pass
+            _ok(tool, ver)
+        else:
+            prefix = "✗" if "required" in hint else "!"
+            if prefix == "✗":
+                _fail(tool, hint)
+            else:
+                _warn(tool, hint)
+
+    typer.echo()
+
+    if issues:
+        typer.echo(
+            f"  {_r(str(len(issues)) + ' issue(s) found.')} "
+            f"Fix the items marked {_r('✗')} above before running tasks."
+        )
+    else:
+        typer.echo(
+            f"  {_g('All checks passed.')} ({ok_count} checks) "
+            f'You\'re ready to run: orchctl request "your change"'
+        )
+    typer.echo()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

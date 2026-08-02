@@ -191,6 +191,7 @@ All canonical commands live in the Makefile. Current targets:
 - `session AGENT-ID [--model MODEL]` — multi-turn interactive identity REPL (`claude` backend: launches `claude` interactively; `python` backend: requires `ANTHROPIC_API_KEY`)
 - `config show` — show current orchctl session config (LLM backend)
 - `config set KEY VALUE` — set a session config value; `llm-backend` accepts `claude` or `python`; stored in `~/.config/orchestra/config`
+- `doctor` — pre-flight check: verify platform services, configured backends, SANDBOX_REPO_PATH, and common domain tools; prints remediation hints for each failure
 
 Orchestrator API (port 8080) — notable endpoints added in Phase 3:
 - `GET /validators` — return the validator registry from `permissions/validators.yaml`
