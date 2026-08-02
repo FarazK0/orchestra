@@ -29,24 +29,19 @@ cd ~/tools/orchestra
 make install       # runs: uv tool install --editable .
 ```
 
-Copy the environment template and fill in your settings:
-
-```bash
-cp .env.example .env
-# Edit .env — at minimum set:
-#   DATABASE_URL=postgresql+psycopg://orchestra:orchestra@localhost:5433/orchestra
-#   REDIS_URL=redis://localhost:6380
-#   ANTHROPIC_API_KEY=sk-...  (only needed if using python-api backend)
-```
-
-Point Orchestra at the project you want agents to work on, then start services:
+Point Orchestra at the project you want agents to work on, then run setup:
 
 ```bash
 export SANDBOX_REPO_PATH=/path/to/your-project   # any git repo on your machine
 
-make setup         # starts Postgres + Redis, runs migrations,
-                   # starts orchestrator + gateway + dispatcher + root agent
+make setup         # interactive: creates .env from .env.example if missing,
+                   # prompts for ANTHROPIC_API_KEY if needed, starts Postgres +
+                   # Redis, runs migrations, starts orchestrator + gateway +
+                   # dispatcher + root agent
 ```
+
+`make setup` handles `.env` for you — you only need to edit it manually if you want to
+change defaults (e.g. swap database credentials or set `ANTHROPIC_API_KEY` upfront).
 
 Verify everything is healthy:
 
