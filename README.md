@@ -1,14 +1,77 @@
 # Orchestra
 
-Human-centric multi-agent orchestration. You own intent, agents own execution,
-the orchestrator owns governance.
+**A control plane for coding agents.** Run Claude Code, Gemini CLI, or any
+stdin-compatible LLM CLI against your repo — under capability-scoped permissions,
+with every side effect audited and nothing reaching `main` without your approval.
+
+[![CI](https://github.com/FarazK0/orchestra/actions/workflows/ci.yml/badge.svg)](https://github.com/FarazK0/orchestra/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+```bash
+export SANDBOX_REPO_PATH=/path/to/your-project
+orchctl request "add JWT auth to the login endpoint"
+orchctl review --repo $SANDBOX_REPO_PATH    # validate, inspect, approve
+```
+
+## Why
+
+Coding agents are useful and unaccountable. They get a shell, your Git
+credentials, and free rein over the filesystem — and the record of what they did
+is whatever scrolled past in the terminal.
+
+Orchestra sits between the agents and your repository:
+
+- **Capability-scoped writes.** Each run carries a signed token declaring which
+  paths it may write. Child tasks can only narrow their parent's scope.
+- **One path to side effects.** No filesystem access, no Git credentials, no
+  database. Everything goes through the gateway and into an append-only audit
+  log — structural, not a policy agents are asked to respect.
+- **Nothing merges unreviewed.** Every task runs on its own branch and passes
+  its validators (ruff, pytest, mypy — configurable per task) before it reaches
+  you. Risk tiers decide what auto-merges and what blocks.
+- **Replayable history.** Control-plane state is event-sourced: every
+  transition, run, and context package is reconstructable after the fact.
+
+## Not another agent framework
+
+Frameworks give you an SDK to build agents in. Orchestra governs the agents you
+already use — on your machine, in front of your repo, with whichever CLI you
+already pay for.
+
+```yaml
+# permissions/backends.yaml
+backends:
+  claude-code: { type: cli, command: ["claude", "-p", "-"], input: stdin }
+  gemini:      { type: cli, command: ["gemini", "-p", "-"], input: stdin }
+defaults:
+  worker: claude-code
+  planner: claude-code
+```
+
+Workers, planners, and validators can each run a different backend. Adding one
+is a line of YAML.
+
+## How it works
 
 ```
-You → Orchestrator → Dispatcher → Agents → Gateway → your-project/
+you → orchestrator → dispatcher → agent (any CLI) → gateway → your repo
+       └─ task DAG, event log, capability tokens ─┘   └─ audit ─┘
 ```
 
-Every side effect is audited through the gateway. Nothing merges to your repo
-without human approval.
+The orchestrator decomposes a request into a task DAG, mints a scoped token per
+run, and assembles each agent's context. The gateway is the only component that
+touches your filesystem or Git. Agent identities (`backend-agent`,
+`frontend-agent`, or any string you invent) accumulate memory across tasks.
+
+## Status
+
+Working and in daily use on real repos. Capability tokens, risk-tier policy,
+provenance tracking, pluggable validators, agent memory, and OpenTelemetry /
+Prometheus / Grafana instrumentation are implemented.
+
+Container-isolated execution is in progress — today the token constrains what an
+agent does **through the gateway**. See `docs/adr/ADR-005` and
+[`docs/guide/overview.md`](docs/guide/overview.md) for the full threat model.
 
 ## Prerequisites
 
