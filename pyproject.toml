@@ -23,6 +23,7 @@ dependencies = [
     "prometheus-fastapi-instrumentator>=6.1",
 ]
 
+
 [project.scripts]
 orchctl = "cli.main:app"
 
